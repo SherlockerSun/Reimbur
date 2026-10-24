@@ -159,7 +159,7 @@ struct WorkspaceView: View {
             SidebarItem(title: "设置", icon: "gearshape", selected: store.showSettings, centered: true, compact: menuCollapsed) {
                 store.showSettings = true; batch = false; checked = []
             }
-            SidebarItem(title: menuCollapsed ? "展开菜单栏" : "收起菜单栏", icon: menuCollapsed ? "chevron.right" : "chevron.left",
+            SidebarItem(title: menuCollapsed ? "展开菜单栏" : "收起", icon: menuCollapsed ? "chevron.right" : "chevron.left",
                         selected: false, centered: true, compact: menuCollapsed) { menuCollapsed.toggle() }
         }.padding(menuCollapsed ? 12 : 20).padding(.top, 40).frame(width: menuCollapsed ? 76 : 210)
             .background(Palette.ink).foregroundStyle(.white)

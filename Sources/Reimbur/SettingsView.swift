@@ -104,6 +104,8 @@ struct SettingsView: View {
                 Card {
                     SectionLabel(title: "关于 Reimbur · 轻记报销", subtitle: "版本 \(version) · 原生 macOS 软件")
                     Text("支持 macOS 14 及以上 · SwiftUI / SQLite / PDFKit").font(.system(size: 12))
+                    Link("GitHub · github.com/SherlockerSun/Reimbur", destination: URL(string: "https://github.com/SherlockerSun/Reimbur")!)
+                        .font(.system(size: 12)).foregroundStyle(Palette.accent)
                     Text("数据仅保存在本机，修改自动保存。票面金额自动识别并支持手动修改，未识别时请补填；行程单不计入发票统计。")
                         .font(.system(size: 11)).foregroundStyle(Palette.muted)
                 }

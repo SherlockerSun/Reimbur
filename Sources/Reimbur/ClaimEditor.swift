@@ -34,7 +34,7 @@ struct ClaimEditor: View {
                     coverSection
                     expenseSection
                     HStack {
-                        Image(systemName: "lock.shield").foregroundStyle(Palette.teal)
+                        Image(systemName: "lock.shield").foregroundStyle(Palette.accent)
                         Text("修改自动保存至本机 · 发票金额需按票面手动填写 · 发票数量按 PDF 文件计")
                     }.font(.system(size: 10)).foregroundStyle(Palette.muted)
                 }.padding(26)
@@ -66,7 +66,7 @@ struct ClaimEditor: View {
         HStack(spacing: 14) {
             VStack(alignment: .leading, spacing: 7) {
                 HStack(spacing: 7) {
-                    Text("\(draft.kind.rawValue)报销").font(.system(size: 10, weight: .semibold)).foregroundStyle(Palette.teal)
+                    Text("\(draft.kind.rawValue)报销").font(.system(size: 10, weight: .semibold)).foregroundStyle(Palette.accent)
                     Text("/").foregroundStyle(Palette.muted)
                     Text("费用工作台").font(.system(size: 10)).foregroundStyle(Palette.muted)
                 }
@@ -84,10 +84,10 @@ struct ClaimEditor: View {
 
     private var metrics: some View {
         HStack(spacing: 12) {
-            Metric(title: "报销总额", value: Money.format(draft.total), icon: "yensign.circle", emphasis: true)
-            Metric(title: "发票金额", value: Money.format(draft.invoiceTotal), icon: "doc.text")
-            Metric(title: "发票数量", value: "\(draft.invoiceCount) 份", icon: "square.stack")
-            Metric(title: "总额 − 发票金额", value: Money.format(draft.difference), icon: "arrow.left.arrow.right")
+            Metric(title: "报销天数", value: "\(draft.reimbursementDayCount) 天", icon: "calendar", background: Color(red: 0.88, green: 0.94, blue: 1))
+            Metric(title: "报销总额", value: Money.format(draft.total), icon: "yensign.circle", background: Color(red: 0.92, green: 0.89, blue: 1))
+            Metric(title: "发票总额", value: Money.format(draft.invoiceTotal), icon: "doc.text", background: Color(red: 1, green: 0.93, blue: 0.84))
+            Metric(title: "发票数量", value: "\(draft.invoiceCount) 份", icon: "square.stack", background: Color(red: 0.86, green: 0.96, blue: 0.95))
         }
     }
     private var basicInfo: some View {
@@ -102,7 +102,7 @@ struct ClaimEditor: View {
             }
             if draft.kind != .trip {
                 Label("\(draft.kind.rawValue)按所选日期与单价计算", systemImage: draft.kind.icon)
-                    .font(.system(size: 12)).foregroundStyle(Palette.teal)
+                    .font(.system(size: 12)).foregroundStyle(Palette.accent)
             }
             LabeledField(title: "备注 / 报销事由") {
                 TextEditor(text: $draft.note).font(.system(size: 12)).scrollContentBackground(.hidden)
@@ -112,7 +112,7 @@ struct ClaimEditor: View {
                     .accessibilityLabel("备注 / 报销事由")
             }
             VStack(alignment: .leading, spacing: 7) {
-                Label("共 \(draft.dates.count) 个报销日", systemImage: "calendar").font(.system(size: 11)).foregroundStyle(Palette.teal)
+                Label("共 \(draft.dates.count) 个报销日", systemImage: "calendar").font(.system(size: 11)).foregroundStyle(Palette.accent)
                 Text(draft.dateSummary).font(.system(size: 10)).foregroundStyle(Palette.muted)
             }
         }
@@ -132,10 +132,10 @@ struct ClaimEditor: View {
                             VStack(alignment: .leading, spacing: 7) {
                                 Label(person.name, systemImage: "person.crop.circle").font(.system(size: 12, weight: .medium))
                                 Text(Money.format(person.total(in: draft))).font(.system(size: 17, weight: .semibold, design: .rounded))
-                                Text("\(person.expenses.count) 笔 · \(person.invoiceCount) 份发票").font(.system(size: 10)).foregroundStyle(Palette.muted)
+                                Text("\(person.days(in: draft))天 · \(person.expenses.count)笔 · \(person.invoiceCount)份发票").font(.system(size: 10)).foregroundStyle(Palette.muted)
                             }.padding(13).frame(minWidth: 130, alignment: .leading)
-                                .background(Palette.teal.opacity(0.06), in: RoundedRectangle(cornerRadius: 9)).contentShape(Rectangle())
-                        }.buttonStyle(.plain).foregroundStyle(Palette.teal).help("查看\(person.name)的分类费用与合计")
+                                .background(Palette.accent.opacity(0.06), in: RoundedRectangle(cornerRadius: 9)).contentShape(Rectangle())
+                        }.buttonStyle(.plain).foregroundStyle(Palette.accent).help("查看\(person.name)的分类费用与合计")
                     }
                 }
             }
@@ -234,15 +234,15 @@ struct ClaimEditor: View {
                 Spacer()
                 VStack(alignment: .trailing, spacing: 5) {
                     Text("本项合计").font(.system(size: 10)).foregroundStyle(Palette.muted)
-                    Text(Money.format(expense.total(in: draft))).font(.system(size: 24, weight: .semibold, design: .rounded)).foregroundStyle(Palette.teal)
+                    Text(Money.format(expense.total(in: draft))).font(.system(size: 24, weight: .semibold, design: .rounded)).foregroundStyle(Palette.accent)
                 }
             }
             if !expense.kind.isTransport {
                 HStack {
-                    Text(expense.formula(in: draft)).font(.system(size: 12, weight: .medium)).foregroundStyle(Palette.teal)
+                    Text(expense.formula(in: draft)).font(.system(size: 12, weight: .medium)).foregroundStyle(Palette.accent)
                     Spacer()
                     if expense.days(in: draft) == 0 { Label(expense.kind == .hotel ? "当天往返为 0 晚，可单独选入住日期" : "请选择日期", systemImage: "info.circle").font(.system(size: 11)).foregroundStyle(.orange) }
-                }.padding(12).background(Palette.teal.opacity(0.05), in: RoundedRectangle(cornerRadius: 8))
+                }.padding(12).background(Palette.accent.opacity(0.05), in: RoundedRectangle(cornerRadius: 8))
                 Toggle(expense.kind == .hotel ? "单独选择入住日期（每个日期计一晚）" : "为这项费用单独选择日期", isOn: Binding(
                     get: { draft.expenses[index].dates != nil },
                     set: { draft.expenses[index].dates = $0 ? (expense.kind == .hotel ? expense.defaultStayDates(in: draft) : draft.dates) : nil }
@@ -261,7 +261,7 @@ struct ClaimEditor: View {
                 invoiceSection(index)
             } else {
                 Label("出差补助无需发票，金额直接计入报销总额。", systemImage: "checkmark.seal")
-                    .font(.system(size: 11)).foregroundStyle(Palette.teal)
+                    .font(.system(size: 11)).foregroundStyle(Palette.accent)
             }
         }
     }
@@ -288,9 +288,9 @@ struct ClaimEditor: View {
                             Text("支持多选 PDF · 上传后填写票面金额").font(.system(size: 10)).foregroundStyle(Palette.muted)
                         }
                         Spacer()
-                    }.foregroundStyle(Palette.teal).padding(20).frame(maxWidth: .infinity)
+                    }.foregroundStyle(Palette.accent).padding(20).frame(maxWidth: .infinity)
                         .background(Palette.canvas, in: RoundedRectangle(cornerRadius: 8))
-                        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Palette.teal.opacity(0.25), style: StrokeStyle(lineWidth: 1, dash: [5, 4])))
+                        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Palette.accent.opacity(0.25), style: StrokeStyle(lineWidth: 1, dash: [5, 4])))
                 }.buttonStyle(.plain)
             }
             if !expense.kind.acceptsInvoices {
@@ -347,7 +347,7 @@ struct ClaimEditor: View {
     private func open(_ attachment: Attachment) {
         let url = store.url(for: attachment)
         if !FileManager.default.fileExists(atPath: url.path) { store.errorMessage = "附件已丢失：\(attachment.name)" }
-        else { store.preview = PreviewRequest(attachment: attachment, url: url) }
+        else { store.preview = PreviewRequest(attachments: draft.attachments, selected: attachment, attachmentRoot: url.deletingLastPathComponent()) }
     }
     private func removeAttachment(_ attachment: Attachment, expenseID: UUID?) {
         if let updated = store.removeAttachment(attachment, from: draft, expenseID: expenseID) { draft = updated }
@@ -373,7 +373,7 @@ private struct InvoiceRow: View {
         HStack(spacing: 12) {
             Button(action: open) {
                 HStack(spacing: 12) {
-                    Image(systemName: "doc.richtext").font(.system(size: 23, weight: .light)).foregroundStyle(Palette.teal)
+                    Image(systemName: "doc.richtext").font(.system(size: 23, weight: .light)).foregroundStyle(Palette.accent)
                     VStack(alignment: .leading, spacing: 5) {
                         Text(invoice.name).font(.system(size: 12)).lineLimit(1)
                         Text("PDF · \(invoice.pageCount) 页 · 点击快速预览").font(.system(size: 10)).foregroundStyle(Palette.muted)

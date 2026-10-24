@@ -67,7 +67,7 @@ struct DashboardView: View {
                         SectionLabel(title: "月度报销金额", subtitle: period.year == 0 ? "以最近一笔记录所在月为末月，展示近 12 个月" : "\(String(period.year)) 年 · 按月汇总")
                         Chart(monthly) { point in
                             BarMark(x: .value("月份", point.date, unit: .month), y: .value("金额（元）", point.amount))
-                                .foregroundStyle(Palette.teal.gradient).cornerRadius(4)
+                                .foregroundStyle(Palette.accent.gradient).cornerRadius(4)
                         }.chartXAxis { AxisMarks(values: .stride(by: .month)) { _ in AxisValueLabel(format: .dateTime.month(.defaultDigits)) } }
                             .chartYAxisLabel("元").frame(height: 245)
                     }
@@ -78,7 +78,7 @@ struct DashboardView: View {
                                 let value = records.filter { $0.kind == kind }.reduce(Int64(0)) { $0 + $1.total }
                                 SectorMark(angle: .value("金额", Double(value) / 100), innerRadius: .ratio(0.62), angularInset: 3)
                                     .foregroundStyle(by: .value("类型", kind.rawValue))
-                            }.chartForegroundStyleScale(["出差": Palette.teal, "餐补": Color.orange, "补助": Color.blue])
+                            }.chartForegroundStyleScale(["出差": Palette.accent, "餐补": Color.orange, "补助": Color.blue])
                                 .frame(height: 245)
                         } else { Text("有报销金额后展示分布").font(.system(size: 12)).foregroundStyle(Palette.muted).frame(maxWidth: .infinity).frame(height: 245) }
                     }.frame(width: 300)

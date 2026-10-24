@@ -92,9 +92,9 @@ struct ExpenseGroupTabs: View {
             Text(group.kind.acceptsInvoices || group.invoiceCount > 0 ? "\(group.invoiceCount) 份发票" : "无需发票")
                 .font(.system(size: 10)).opacity(0.7)
         }.font(.system(size: 11)).padding(14).frame(width: tabWidth)
-            .foregroundStyle(selection == group.kind ? Palette.teal : Palette.ink)
-            .background(selection == group.kind ? Palette.teal.opacity(0.08) : .white, in: RoundedRectangle(cornerRadius: 10))
-            .overlay(RoundedRectangle(cornerRadius: 10).stroke(drag?.kind == group.kind ? Palette.teal : (selection == group.kind ? Palette.teal.opacity(0.5) : Palette.ink.opacity(0.08)), lineWidth: drag?.kind == group.kind ? 2 : 1))
+            .foregroundStyle(selection == group.kind ? Palette.accent : Palette.ink)
+            .background(selection == group.kind ? Palette.accent.opacity(0.08) : .white, in: RoundedRectangle(cornerRadius: 10))
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(drag?.kind == group.kind ? Palette.accent : (selection == group.kind ? Palette.accent.opacity(0.5) : Palette.ink.opacity(0.08)), lineWidth: drag?.kind == group.kind ? 2 : 1))
             .contentShape(Rectangle()).help("点击查看\(group.kind.rawValue)，拖动整个卡片左右排序")
     }
 }

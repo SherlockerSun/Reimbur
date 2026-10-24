@@ -3,8 +3,8 @@ import AppKit
 
 enum Palette {
     static let ink = Color(red: 0.12, green: 0.19, blue: 0.25)
-    static let teal = Color(red: 0.05, green: 0.46, blue: 0.40)
-    static let canvas = Color(red: 0.96, green: 0.97, blue: 0.96)
+    static let accent = Color(red: 63 / 255, green: 150 / 255, blue: 1)
+    static let canvas = Color(red: 0.96, green: 0.97, blue: 0.99)
     static let muted = Color(red: 0.45, green: 0.50, blue: 0.53)
 }
 
@@ -38,6 +38,7 @@ struct Metric: View {
     var value: String
     var icon: String
     var emphasis = false
+    var background: Color? = nil
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack { Text(title).font(.system(size: 11)); Spacer(); Image(systemName: icon) }
@@ -45,7 +46,7 @@ struct Metric: View {
             Text(value).font(.system(size: 21, weight: .semibold, design: .rounded)).monospacedDigit().minimumScaleFactor(0.6).lineLimit(1)
                 .foregroundStyle(emphasis ? .white : Palette.ink)
         }.padding(17).frame(maxWidth: .infinity, alignment: .leading)
-            .background(emphasis ? Palette.teal : .white, in: RoundedRectangle(cornerRadius: 12))
+            .background(background ?? (emphasis ? Palette.accent : .white), in: RoundedRectangle(cornerRadius: 12))
     }
 }
 
@@ -92,7 +93,7 @@ struct CalendarPicker: View {
     @State private var lastPoint: CGPoint?
     @State private var lastSweep = Date.distantPast
     @State private var coordinateID = UUID()
-    private let columns = Array(repeating: GridItem(.flexible(), spacing: 3), count: 7)
+    private let columns = Array(repeating: GridItem(.flexible(), spacing: 0), count: 7)
     init(selection: Binding<Set<String>>) {
         _selection = selection
         _month = State(initialValue: selection.wrappedValue.sorted().first.flatMap(DayKey.date) ?? Date())
@@ -112,21 +113,23 @@ struct CalendarPicker: View {
                 Button("今天") { month = Date() }.font(.system(size: 11))
                 Button { move(1) } label: { Image(systemName: "chevron.right") }.help("下个月")
             }.buttonStyle(.plain)
-            LazyVGrid(columns: columns, spacing: 4) {
+            LazyVGrid(columns: columns, spacing: 0) {
                 ForEach(["一", "二", "三", "四", "五", "六", "日"], id: \.self) { day in
                     Text(day).font(.system(size: 10)).foregroundStyle(Palette.muted).frame(height: 22)
                 }
                 ForEach(0..<(offset + count), id: \.self) { index in
-                    if index < offset { Color.clear.frame(height: 28) }
+                    if index < offset { Color.clear.frame(height: 32) }
                     else {
                         let date = DayKey.calendar.date(byAdding: .day, value: index - offset, to: first)!
                         let key = DayKey.string(date)
                         let selected = selection.contains(key)
-                        Text("\(index - offset + 1)").font(.system(size: 11, weight: selected ? .semibold : .regular))
-                                .frame(maxWidth: .infinity).frame(height: 28)
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 7).fill(selected ? Palette.accent : .clear)
+                                .padding(2)
+                            Text("\(index - offset + 1)").font(.system(size: 11, weight: selected ? .semibold : .regular))
                                 .foregroundStyle(selected ? .white : Palette.ink)
-                                .background(selected ? Palette.teal : .clear, in: RoundedRectangle(cornerRadius: 7))
-                                .overlay(RoundedRectangle(cornerRadius: 7).stroke(DayKey.calendar.isDateInToday(date) ? Palette.teal : .clear))
+                            RoundedRectangle(cornerRadius: 7).stroke(DayKey.calendar.isDateInToday(date) ? Palette.accent : .clear).padding(2)
+                        }.frame(maxWidth: .infinity).frame(height: 32)
                             .contentShape(Rectangle())
                             .onTapGesture {
                                 guard Date().timeIntervalSince(lastSweep) > 0.3 else { return }
@@ -138,6 +141,7 @@ struct CalendarPicker: View {
                     }
                 }
             }
+            .contentShape(Rectangle())
             .coordinateSpace(name: coordinateID)
             .onPreferenceChange(CalendarFrames.self) { frames = $0 }
             .simultaneousGesture(LongPressGesture(minimumDuration: 0.22, maximumDistance: 14)
@@ -156,12 +160,13 @@ struct CalendarPicker: View {
                         lastSweep = Date()
                     }
                 }
-                .onEnded { _ in
+                .onEnded { value in
+                    if case .second(true, let drag?) = value, lastPoint != nil { visit(drag.location) }
                     if lastPoint != nil { lastSweep = Date() }
                     paint = CalendarPaintSelection(); lastPoint = nil
                 })
             HStack {
-                Text("已选 \(selection.count) 天").foregroundStyle(Palette.teal).fontWeight(.medium)
+                Text("已选 \(selection.count) 天").foregroundStyle(Palette.accent).fontWeight(.medium)
                 Spacer()
                 Menu("快捷选择") {
                     Button("选择本月工作日") {
@@ -219,7 +224,7 @@ struct PeopleTagInput: View {
                                     Image(systemName: "xmark").font(.system(size: 9, weight: .bold))
                                 }.buttonStyle(.plain).help("移除\(name)")
                             }.font(.system(size: 12)).padding(.horizontal, 9).padding(.vertical, 5)
-                                .foregroundStyle(Palette.teal).background(Palette.teal.opacity(0.09), in: Capsule())
+                                .foregroundStyle(Palette.accent).background(Palette.accent.opacity(0.09), in: Capsule())
                         }
                         TextField("输入姓名，回车确认", text: $input).textFieldStyle(.plain)
                             .font(.system(size: 12)).focused($focused).frame(minWidth: 130)
@@ -235,7 +240,7 @@ struct PeopleTagInput: View {
             }
         }.frame(height: 38)
             .background(.white, in: RoundedRectangle(cornerRadius: 7))
-            .overlay(RoundedRectangle(cornerRadius: 7).stroke(focused ? Palette.teal : Palette.ink.opacity(0.18), lineWidth: focused ? 1.5 : 1))
+            .overlay(RoundedRectangle(cornerRadius: 7).stroke(focused ? Palette.accent : Palette.ink.opacity(0.18), lineWidth: focused ? 1.5 : 1))
             .background(OutsideClickObserver(enabled: focused && !input.isEmpty, action: commit))
     }
     private func commit() {

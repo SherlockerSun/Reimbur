@@ -194,7 +194,9 @@ final class ReimburChecks {
         expectTrue(overview.contains("=3632.12"))
         for (person, amount) in zip(people, ["2029.05", "1603.07"]) {
             let personal = ClaimSummary.renderPerson(claim, person: person)
-            expectTrue(personal.contains("报销人：\(person.name)"))
+            expectFalse(personal.contains("个人报销明细"))
+            expectFalse(personal.contains("报销人："))
+            expectTrue(personal.contains("出差人：\(person.name)"))
             expectTrue(personal.contains("=\(amount)"))
             expectFalse(personal.contains(person.claimant == "蔡建坤" ? "出差人：孙毅强" : "出差人：蔡建坤"))
         }
@@ -221,7 +223,7 @@ final class ReimburChecks {
         }
         defer { pasteboard.clearContents(); pasteboard.writeObjects(previous) }
         let qa = ProcessInfo.processInfo.environment["REIMBUR_QA_DIR"].map { URL(fileURLWithPath: $0) } ?? temporary!
-        try captureView(ClaimTextPreview(claim: claim, initialPersonID: person.id, close: {}).preferredColorScheme(.light).tint(Palette.teal), width: 900, height: 740, to: qa.appendingPathComponent("personal-preview.png")) { window, host in
+        try captureView(ClaimTextPreview(claim: claim, initialPersonID: person.id, close: {}).preferredColorScheme(.light).tint(Palette.accent), width: 900, height: 740, to: qa.appendingPathComponent("personal-preview.png")) { window, host in
             var sequence = 12
             @MainActor func click(_ point: NSPoint) {
                 sequence += 1
@@ -236,14 +238,14 @@ final class ReimburChecks {
                     RunLoop.current.run(until: Date().addingTimeInterval(0.005))
                 }
             }
-            click(NSPoint(x: 769, y: 28))
+            click(NSPoint(x: 867, y: 33))
             expectEqual(pasteboard.string(forType: .string), ClaimSummary.renderPerson(claim, person: person))
             click(NSPoint(x: 46, y: 92))
-            click(NSPoint(x: 769, y: 28))
+            click(NSPoint(x: 867, y: 33))
             expectEqual(pasteboard.string(forType: .string), ClaimSummary.renderOverview(claim))
             expectFalse(pasteboard.string(forType: .string)?.contains("个人报销明细") ?? true)
             click(NSPoint(x: 106, y: 92))
-            click(NSPoint(x: 769, y: 28))
+            click(NSPoint(x: 867, y: 33))
             expectEqual(pasteboard.string(forType: .string), ClaimSummary.renderPerson(claim, person: claim.personBreakdowns[0]))
             click(NSPoint(x: 180, y: 92))
         }
@@ -275,15 +277,19 @@ final class ReimburChecks {
         let date = DayKey.date("2026-10-23")!
         let first = Claim.make(.trip, date: date)
         let second = Claim.make(.meal, date: date)
-        expectEqual(first.title, "报销20261023")
-        expectEqual(second.title, first.title)
+        let duplicate = Claim.make(.trip, date: date)
+        expectEqual(first.title, "出差报销20261023")
+        expectEqual(second.title, "餐补报销20261023")
+        expectEqual(Claim.make(.allowance, date: date).title, "补助报销20261023")
+        expectEqual(duplicate.title, first.title)
         expectFalse(first.id == second.id)
         let database = try Database(root: temporary)
         try database.save(first)
         try database.save(second)
+        try database.save(duplicate)
         let restored = try Database(root: temporary).load()
-        expectEqual(restored.count, 2)
-        expectTrue(restored.allSatisfy { $0.title == "报销20261023" })
+        expectEqual(restored.count, 3)
+        expectEqual(restored.filter { $0.title == "出差报销20261023" }.count, 2)
     }
 
     func testExpenseGroupsAggregateWithoutMergingEntries() throws {
@@ -415,10 +421,6 @@ final class ReimburChecks {
         let imageSession = AttachmentPreviewSession(url: cover)
         expectNil(imageSession.errorMessage)
         expectTrue(imageSession.image != nil)
-        imageSession.zoomIn()
-        expectTrue(imageSession.imageZoom > 1)
-        imageSession.fit()
-        expectEqual(imageSession.imageZoom, 1)
         let invalid = AttachmentPreviewSession(url: temporary.appendingPathComponent("missing.png"))
         expectTrue(invalid.errorMessage != nil)
         if let directory = ProcessInfo.processInfo.environment["REIMBUR_QA_DIR"] {
@@ -428,6 +430,130 @@ final class ReimburChecks {
             let form = Attachment(name: "预览.png", storedName: "预览.png")
             try captureView(AttachmentPreview(request: PreviewRequest(attachment: invoice, url: pdf)), width: 1000, height: 740, to: qa.appendingPathComponent("pdf-preview.png"))
             try captureView(AttachmentPreview(request: PreviewRequest(attachment: form, url: cover)), width: 1000, height: 740, to: qa.appendingPathComponent("image-preview.png"))
+        }
+    }
+
+    @MainActor func testDifferentPersonalDatesUseLongestDuration() throws {
+        var claim = Claim.make(.trip)
+        claim.dates = Set((1...5).map { "2026-10-0\($0)" })
+        claim.setTravelerNames(["张三", "李四"])
+        claim.expenses[0].unitPrice = 10000
+        claim.expenses[0].dates = ["2026-10-01", "2026-10-02"]
+        claim.expenses[1].unitPrice = 10000
+        claim.expenses[1].dates = ["2026-10-10", "2026-10-11", "2026-10-12"]
+        claim.addExpense(.train, unitPrice: 20000)
+        claim.addExpense(.hotel, unitPrice: 10000)
+        expectEqual(claim.personBreakdowns.map { $0.days(in: claim) }, [2, 3])
+        expectEqual(claim.reimbursementDayCount, 3)
+        expectTrue(ClaimSummary.renderOverview(claim).contains("日期：2026-10-01~2026-10-02、2026-10-10~2026-10-12（3 天）"))
+        let text = ClaimSummary.renderPerson(claim, person: claim.personBreakdowns[1])
+        expectTrue(text.contains("2026-10-10~2026-10-12（3 天）"))
+        expectFalse(text.contains("个人报销明细"))
+        expectFalse(text.contains("报销人："))
+        let store = ClaimStore(root: temporary)
+        expectTrue(store.save(claim))
+        if let directory = ProcessInfo.processInfo.environment["REIMBUR_QA_DIR"] {
+            let qa = URL(fileURLWithPath: directory)
+            try captureView(ClaimEditor(claim: claim).environmentObject(store).background(Palette.canvas).tint(Palette.accent), width: 1000, height: 1480, to: qa.appendingPathComponent("statistics-and-days.png"))
+        }
+        var empty = Claim.make(.trip)
+        expectEqual(empty.reimbursementDayCount, 0)
+        empty.dates = ["2026-10-24"]
+        expectEqual(empty.reimbursementDayCount, 1)
+    }
+
+    @MainActor func testGalleryNavigationCopyDownloadAndCanvas() throws {
+        let pdf = temporary.appendingPathComponent("第一份.pdf")
+        let png = temporary.appendingPathComponent("报销单.png")
+        try makePDF(at: pdf, pages: 2)
+        try makeCover(at: png)
+        let invoice = Attachment(name: pdf.lastPathComponent, storedName: pdf.lastPathComponent)
+        let cover = Attachment(name: png.lastPathComponent, storedName: png.lastPathComponent)
+        let request = PreviewRequest(attachments: [invoice, cover], selected: invoice, attachmentRoot: temporary)
+        let session = AttachmentPreviewSession(request: request)
+        expectFalse(session.canMovePrevious)
+        session.move(1); expectEqual(session.pageNumber, 2)
+        session.move(1); expectEqual(session.item.attachment.id, cover.id)
+        expectFalse(session.canMoveNext)
+        session.move(-1); expectEqual(session.item.attachment.id, invoice.id)
+        expectEqual(session.pageNumber, 2)
+        let board = NSPasteboard(name: NSPasteboard.Name("Reimbur-gallery-\(UUID())"))
+        defer { board.releaseGlobally() }
+        expectTrue(session.copy(to: board))
+        expectEqual(board.string(forType: .fileURL), pdf.absoluteString)
+        expectTrue(board.canReadObject(forClasses: [NSImage.self], options: nil))
+        let saved = temporary.appendingPathComponent("下载.pdf")
+        try Data("existing".utf8).write(to: saved)
+        try session.saveCopy(to: saved)
+        expectEqual(try Data(contentsOf: saved), try Data(contentsOf: pdf))
+        let initialImage = AttachmentPreviewSession(request: PreviewRequest(attachments: [invoice, cover], selected: cover, attachmentRoot: temporary))
+        expectEqual(initialImage.item.attachment.id, cover.id)
+        let missing = Attachment(name: "丢失.png", storedName: "丢失.png")
+        let broken = AttachmentPreviewSession(request: PreviewRequest(attachments: [cover, missing, invoice], selected: missing, attachmentRoot: temporary))
+        expectTrue(broken.errorMessage != nil)
+        broken.move(1); expectEqual(broken.item.attachment.id, invoice.id)
+        expectNil(broken.errorMessage)
+
+        let qa = ProcessInfo.processInfo.environment["REIMBUR_QA_DIR"].map { URL(fileURLWithPath: $0) } ?? temporary!
+        try captureView(AttachmentPreview(request: request).tint(Palette.accent), width: 1000, height: 740, to: qa.appendingPathComponent("gallery-preview.png")) { window, host in
+            @MainActor func canvas(in view: NSView) -> AttachmentCanvasView? {
+                if let view = view as? AttachmentCanvasView { return view }
+                return view.subviews.lazy.compactMap { canvas(in: $0) }.first
+            }
+            guard let view = canvas(in: host) else { fail("Missing attachment canvas"); return }
+            expectEqual(view.contentID, "\(invoice.id)-1")
+            let wheel = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: 45, wheel2: 0, wheel3: 0)!
+            wheel.location = CGPoint(x: 500, y: 400)
+            view.scrollWheel(with: NSEvent(cgEvent: wheel)!)
+            expectTrue(view.zoom > 1)
+            @MainActor func event(_ type: NSEvent.EventType, _ point: NSPoint) -> NSEvent {
+                NSEvent.mouseEvent(with: type, location: view.convert(point, to: nil), modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil, eventNumber: 100, clickCount: 1, pressure: 1)!
+            }
+            view.mouseDown(with: event(.leftMouseDown, NSPoint(x: 450, y: 300)))
+            view.mouseDragged(with: event(.leftMouseDragged, NSPoint(x: 480, y: 330)))
+            view.mouseUp(with: event(.leftMouseUp, NSPoint(x: 480, y: 330)))
+            expectFalse(view.pan == .zero)
+            nativeClick(NSPoint(x: 500, y: 400), in: host, window: window, count: 2)
+            expectEqual(view.zoom, 1)
+            expectEqual(view.pan, .zero)
+            let menu = view.menu(for: event(.rightMouseDown, .zero))
+            expectEqual(menu?.items.map(\.title), ["复制", "下载"])
+            expectTrue(menu?.items.allSatisfy { $0.image != nil } == true)
+            nativeClick(NSPoint(x: 970, y: 400), in: host, window: window)
+            expectEqual(canvas(in: host)?.contentID, "\(invoice.id)-2")
+            nativeClick(NSPoint(x: 970, y: 400), in: host, window: window)
+            expectEqual(canvas(in: host)?.contentID, "\(cover.id)-1")
+            nativeClick(NSPoint(x: 30, y: 400), in: host, window: window)
+            expectEqual(canvas(in: host)?.contentID, "\(invoice.id)-2")
+            nativeClick(NSPoint(x: 879, y: 31), in: host, window: window)
+            expectEqual(canvas(in: host)?.contentID, "\(cover.id)-1")
+        }
+    }
+
+    @MainActor func testCalendarCellCornersAndSweep() throws {
+        let state = InteractionState()
+        let view = CalendarPicker(selection: Binding(get: { state.dates }, set: { state.dates = $0 }))
+            .padding(20).background(.white).tint(Palette.accent)
+        let qa = ProcessInfo.processInfo.environment["REIMBUR_QA_DIR"].map { URL(fileURLWithPath: $0) } ?? temporary!
+        try captureView(view, width: 320, height: 340, to: qa.appendingPathComponent("calendar-cells.png")) { window, host in
+            // Cell corners deliberately avoid the centered numeral.
+            nativeClick(NSPoint(x: 141, y: 71), in: host, window: window)
+            expectTrue(state.dates.contains("2026-10-01") == false)
+            let number = window.windowNumber
+            let points = (1...20).map { host.convert(NSPoint(x: 181 + CGFloat($0) * 4, y: 71), to: nil) }
+            DispatchQueue.global().async {
+                Thread.sleep(forTimeInterval: 0.35)
+                for (index, point) in points.enumerated() {
+                    let type: NSEvent.EventType = index == 19 ? .leftMouseUp : .leftMouseDragged
+                    let event = NSEvent.mouseEvent(with: type, location: point, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: number, context: nil, eventNumber: 700, clickCount: 1, pressure: type == .leftMouseUp ? 0 : 1)!
+                    NSApplication.shared.postEvent(event, atStart: false)
+                    Thread.sleep(forTimeInterval: 0.01)
+                }
+            }
+            let down = NSEvent.mouseEvent(with: .leftMouseDown, location: host.convert(NSPoint(x: 181, y: 71), to: nil), modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: number, context: nil, eventNumber: 700, clickCount: 1, pressure: 1)!
+            NSApplication.shared.sendEvent(down)
+            pumpNativeEvents(0.9)
+            expectEqual(state.dates, ["2026-10-02", "2026-10-03", "2026-10-04"])
         }
     }
 
@@ -489,7 +615,7 @@ final class ReimburChecks {
             try FileManager.default.createDirectory(at: qa, withIntermediateDirectories: true)
             try FileManager.default.copyItem(at: output, to: qa.appendingPathComponent("export-test.docx"))
             try captureUI(store: store, to: qa.appendingPathComponent("app-preview.png"))
-            try captureView(SettingsView().environmentObject(store).background(Palette.canvas).preferredColorScheme(.light).tint(Palette.teal), width: 1230, height: 1060, to: qa.appendingPathComponent("settings.png"))
+            try captureView(SettingsView().environmentObject(store).background(Palette.canvas).preferredColorScheme(.light).tint(Palette.accent), width: 1230, height: 1060, to: qa.appendingPathComponent("settings.png"))
             try captureView(ClaimTextPreview(claim: claim, close: {}), width: 900, height: 740, to: qa.appendingPathComponent("text-preview.png"))
             try captureView(WorkspaceView().environmentObject(store).overlay {
                 DismissibleOverlay(close: {}) { AttachmentPreview(request: PreviewRequest(attachment: claim.covers[0], url: store.url(for: claim.covers[0])), close: {}) }
@@ -498,12 +624,12 @@ final class ReimburChecks {
             grouped.expenses.removeAll { $0.kind == .subsidy || $0.kind == .hotel }
             grouped.expenses += [Expense(kind: .train, unitPrice: 40300, origin: "杭州东", destination: "上海虹桥"),
                                  Expense(kind: .taxi, unitPrice: 3800), Expense(kind: .taxi, unitPrice: 5600)]
-            try captureView(ClaimEditor(claim: grouped).environmentObject(store).frame(width: 960, height: 1200).background(Palette.canvas).preferredColorScheme(.light).tint(Palette.teal), width: 960, height: 1200, to: qa.appendingPathComponent("grouped-expenses.png"))
+            try captureView(ClaimEditor(claim: grouped).environmentObject(store).frame(width: 960, height: 1200).background(Palette.canvas).preferredColorScheme(.light).tint(Palette.accent), width: 960, height: 1200, to: qa.appendingPathComponent("grouped-expenses.png"))
             var sixRows = claim
             sixRows.dates = ["2026-11-01", "2026-11-30"]
-            try captureView(ClaimEditor(claim: sixRows).environmentObject(store).background(Palette.canvas).preferredColorScheme(.light).tint(Palette.teal), width: 689, height: 1000, to: qa.appendingPathComponent("six-row-calendar-min-width.png"))
+            try captureView(ClaimEditor(claim: sixRows).environmentObject(store).background(Palette.canvas).preferredColorScheme(.light).tint(Palette.accent), width: 689, height: 1000, to: qa.appendingPathComponent("six-row-calendar-min-width.png"))
             let multi = multiPersonClaim()
-            try captureView(ClaimEditor(claim: multi).environmentObject(store).background(Palette.canvas).preferredColorScheme(.light).tint(Palette.teal), width: 960, height: 1540, to: qa.appendingPathComponent("people-editor.png"))
+            try captureView(ClaimEditor(claim: multi).environmentObject(store).background(Palette.canvas).preferredColorScheme(.light).tint(Palette.accent), width: 960, height: 1540, to: qa.appendingPathComponent("people-editor.png"))
         }
     }
 
@@ -744,7 +870,7 @@ final class ReimburChecks {
         defer { defaults.removePersistentDomain(forName: suite) }
         let store = ClaimStore(root: temporary)
         expectTrue(store.save(sampleClaim()))
-        let view = WorkspaceView().environmentObject(store).defaultAppStorage(defaults).preferredColorScheme(.light).tint(Palette.teal)
+        let view = WorkspaceView().environmentObject(store).defaultAppStorage(defaults).preferredColorScheme(.light).tint(Palette.accent)
         let imageURL = ProcessInfo.processInfo.environment["REIMBUR_QA_DIR"].map { URL(fileURLWithPath: $0).appendingPathComponent("settings-min-window.png") } ?? temporary.appendingPathComponent("settings.png")
         try captureView(view, width: 1180, height: 760, to: imageURL) { window, host in
             var sequence = 11
@@ -851,7 +977,7 @@ final class ReimburChecks {
         let suite = "Reimbur-qa-\(UUID())"
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
-        let view = WorkspaceView().environmentObject(store).defaultAppStorage(defaults).frame(width: 1440, height: 1060).preferredColorScheme(.light).tint(Palette.teal)
+        let view = WorkspaceView().environmentObject(store).defaultAppStorage(defaults).frame(width: 1440, height: 1060).preferredColorScheme(.light).tint(Palette.accent)
         try captureView(view, width: 1440, height: 1060, to: url)
         try captureView(view, width: 1440, height: 1060, to: url.deletingLastPathComponent().appendingPathComponent("record-list.png")) { window, hosting in
             let location = hosting.convert(NSPoint(x: 80, y: 238), to: nil)
@@ -911,6 +1037,23 @@ final class ReimburChecks {
 
 
 private var failures = 0
+@MainActor private func pumpNativeEvents(_ duration: Double = 0.25) {
+    let end = Date().addingTimeInterval(duration)
+    while Date() < end {
+        if let event = NSApplication.shared.nextEvent(matching: .any, until: Date().addingTimeInterval(0.01), inMode: .default, dequeue: true), ![NSEvent.EventType.keyDown, .keyUp, .flagsChanged].contains(event.type) { NSApplication.shared.sendEvent(event) }
+        RunLoop.current.run(until: Date().addingTimeInterval(0.005))
+    }
+}
+private var nativeEventNumber = 1000
+@MainActor private func nativeClick(_ point: NSPoint, in view: NSView, window: NSWindow, count: Int = 1) {
+    nativeEventNumber += 1
+    let location = view.convert(point, to: nil)
+    let up = NSEvent.mouseEvent(with: .leftMouseUp, location: location, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime + 0.01, windowNumber: window.windowNumber, context: nil, eventNumber: nativeEventNumber, clickCount: count, pressure: 0)!
+    NSApplication.shared.postEvent(up, atStart: false)
+    let down = NSEvent.mouseEvent(with: .leftMouseDown, location: location, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil, eventNumber: nativeEventNumber, clickCount: count, pressure: 1)!
+    NSApplication.shared.sendEvent(down)
+    pumpNativeEvents()
+}
 private func fail(_ text: String, file: StaticString = #filePath, line: UInt = #line) {
     failures += 1
     print("FAIL \(file):\(line): \(text)")
@@ -944,6 +1087,9 @@ private func expectNoThrow<T>(_ action: @autoclosure () throws -> T, file: Stati
         NSApplication.shared.activate(ignoringOtherApps: true)
         let checks = ReimburChecks()
         let tests: [(String, () throws -> Void)] = [
+            ("Different personal dates use longest duration and colored statistics", checks.testDifferentPersonalDatesUseLongestDuration),
+            ("Gallery navigation, copy, download and interactive canvas", checks.testGalleryNavigationCopyDownloadAndCanvas),
+            ("Native calendar cell corners and sweep", checks.testCalendarCellCornersAndSweep),
             ("Two-day hotel means one night with independent stay override", checks.testTwoDayHotelUsesOneNightAndExplicitStayDatesOverride),
             ("Named expenses and per-person subsidies reconcile", checks.testNamedExpensesAndSubsidiesReconcileWithoutDoubleCounting),
             ("Legacy people migration retains invoices and stable row IDs", checks.testLegacyPeopleMigrationPreservesInvoicesAndStableIDs),
@@ -973,7 +1119,9 @@ private func expectNoThrow<T>(_ action: @autoclosure () throws -> T, file: Stati
             ("Export failure preserves existing file", checks.testExportFailurePreservesExistingFile)
         ]
         let selectedTests = tests.filter { test in
-            ProcessInfo.processInfo.environment["REIMBUR_CHECK_FILTER"].map { test.0.localizedCaseInsensitiveContains($0) } ?? true
+            ProcessInfo.processInfo.environment["REIMBUR_CHECK_FILTER"].map { filters in
+                filters.split(separator: "|").contains { test.0.localizedCaseInsensitiveContains(String($0)) }
+            } ?? true
         }
         for (name, test) in selectedTests {
             let before = failures

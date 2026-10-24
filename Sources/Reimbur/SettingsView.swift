@@ -70,7 +70,7 @@ struct SettingsView: View {
                     }
                     HStack {
                         Label(store.ready ? "数据库运行正常" : "数据库不可用", systemImage: store.ready ? "checkmark.circle" : "exclamationmark.triangle")
-                            .font(.system(size: 12)).foregroundStyle(store.ready ? Palette.teal : .orange)
+                            .font(.system(size: 12)).foregroundStyle(store.ready ? Palette.accent : .orange)
                         Spacer()
                         Button(pathCopied ? "已复制路径" : "复制路径") {
                             NSPasteboard.general.clearContents(); NSPasteboard.general.setString(store.root.path, forType: .string); pathCopied = true

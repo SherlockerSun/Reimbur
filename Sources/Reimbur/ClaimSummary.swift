@@ -43,8 +43,6 @@ enum ClaimSummary {
     private static func renderSection(_ claim: Claim, person: PersonBreakdown? = nil) -> String {
         var lines = [claim.title, "类型：\(claim.kind.rawValue)报销"]
         if let person {
-            lines.append("个人报销明细")
-            lines.append("报销人：\(person.name)")
             if claim.kind == .trip { lines.append("出差人：\(person.name)（\(person.claimant == nil ? claim.travelerCount : 1) 人）") }
         } else if claim.kind == .trip {
             let people = claim.travelerNames.map { $0.isEmpty ? "未填写" : $0.joined(separator: "、") } ?? "历史记录，尚未填写姓名"
@@ -52,7 +50,9 @@ enum ClaimSummary {
         } else if let names = claim.travelerNames, !names.isEmpty {
             lines.append("报销人：\(names.joined(separator: "、"))（\(names.count) 人）")
         }
-        lines.append("日期：\(ranges(claim.dates))（\(claim.dates.count) 天）")
+        let dates = person?.dates(in: claim) ?? claim.reimbursementDates
+        let days = person?.days(in: claim) ?? claim.reimbursementDayCount
+        lines.append("日期：\(ranges(dates))（\(days) 天）")
         for (index, group) in claim.expenseGroups.enumerated() {
             lines += ["", "\(index + 1)、\(group.kind.rawValue)"]
             if group.kind.hasRoute {

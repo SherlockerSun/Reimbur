@@ -160,7 +160,7 @@ struct Claim: Codable, Identifiable, Equatable {
 
     static func make(_ kind: ClaimKind, date: Date = Date()) -> Claim {
         let suffix = DayKey.string(date).replacingOccurrences(of: "-", with: "")
-        var claim = Claim(title: "报销\(suffix)", kind: kind, createdAt: date, updatedAt: date)
+        var claim = Claim(title: "\(kind.rawValue)报销\(suffix)", kind: kind, createdAt: date, updatedAt: date)
         claim.setTravelerNames([])
         claim.expenses = [Expense(kind: kind.categories[0])]
         return claim
@@ -199,6 +199,11 @@ struct Claim: Codable, Identifiable, Equatable {
         return people
     }
     var total: Int64 { expenses.reduce(0) { $0 + $1.total(in: self) } }
+    var reimbursementDayCount: Int { personBreakdowns.map { $0.days(in: self) }.max() ?? dates.count }
+    var reimbursementDates: Set<String> {
+        let resolved = personBreakdowns.reduce(into: Set<String>()) { $0.formUnion($1.dates(in: self)) }
+        return resolved.isEmpty ? dates : resolved
+    }
     var invoiceTotal: Int64 { expenses.reduce(0) { $0 + $1.invoiceTotal } }
     var invoiceCount: Int { expenses.reduce(0) { $0 + $1.invoices.count } }
     var difference: Int64 { total - invoiceTotal }
@@ -232,6 +237,22 @@ struct PersonBreakdown: Identifiable {
     var invoiceCount: Int { expenses.reduce(0) { $0 + $1.invoices.count } }
     var invoiceTotal: Int64 { expenses.reduce(0) { $0 + $1.invoiceTotal } }
     func total(in claim: Claim) -> Int64 { expenses.reduce(0) { $0 + $1.total(in: claim) } }
+    func dates(in claim: Claim) -> Set<String> {
+        guard !expenses.isEmpty else { return [] }
+        // Allowance calendars define a person's trip; transport and hotel dates must not inflate it.
+        let allowances = expenses.filter { [.subsidy, .meal, .allowance].contains($0.kind) }
+        if !allowances.isEmpty { return allowances.reduce(into: Set<String>()) { $0.formUnion($1.dates ?? claim.dates) } }
+        let dated = expenses.filter { $0.dates != nil }
+        if dated.isEmpty { return claim.dates }
+        return dated.reduce(into: Set<String>()) { result, expense in
+            result.formUnion(expense.dates ?? [])
+            if expense.kind == .hotel, let last = expense.dates?.sorted().last.flatMap(DayKey.date),
+               let checkout = DayKey.calendar.date(byAdding: .day, value: 1, to: last) {
+                result.insert(DayKey.string(checkout))
+            }
+        }
+    }
+    func days(in claim: Claim) -> Int { dates(in: claim).count }
 }
 
 struct ExpenseGroup: Identifiable {

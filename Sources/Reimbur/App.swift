@@ -9,7 +9,7 @@ import AppKit
             WorkspaceView().environmentObject(store)
                 .frame(minWidth: 1180, minHeight: 760)
                 .preferredColorScheme(.light)
-                .tint(Palette.teal)
+                .tint(Palette.accent)
         }
         .defaultSize(width: 1440, height: 940)
         .windowStyle(.hiddenTitleBar)
@@ -61,7 +61,7 @@ struct WorkspaceView: View {
                     ClaimEditor(claim: claim).id(claim.id)
                 } else {
                     VStack(spacing: 18) {
-                        Image(systemName: "doc.text.below.ecg").font(.system(size: 48, weight: .light)).foregroundStyle(Palette.teal)
+                        Image(systemName: "doc.text.below.ecg").font(.system(size: 48, weight: .light)).foregroundStyle(Palette.accent)
                         Text("选择一条报销记录，或新建开始记录").font(.system(size: 18))
                         newButton
                     }.frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -212,11 +212,11 @@ struct WorkspaceView: View {
     @ViewBuilder private var newButton: some View {
         if let filter {
             Button { create(filter) } label: { Label("新建", systemImage: "plus.circle.fill") }
-                .buttonStyle(.plain).foregroundStyle(Palette.teal).help("新建\(filter.rawValue)报销").disabled(!store.ready)
+                .buttonStyle(.plain).foregroundStyle(Palette.accent).help("新建\(filter.rawValue)报销").disabled(!store.ready)
         } else {
             Menu {
                 ForEach(ClaimKind.allCases) { kind in Button("新建\(kind.rawValue)报销", systemImage: kind.icon) { create(kind) } }
-            } label: { Label("新建", systemImage: "plus.circle.fill").foregroundStyle(Palette.teal) }
+            } label: { Label("新建", systemImage: "plus.circle.fill").foregroundStyle(Palette.accent) }
                 .menuStyle(.borderlessButton).fixedSize().disabled(!store.ready)
         }
     }
@@ -228,7 +228,7 @@ struct WorkspaceView: View {
             } label: {
                 VStack(alignment: .leading, spacing: 12) {
                     HStack {
-                        Label(claim.kind.rawValue, systemImage: claim.kind.icon).font(.system(size: 10)).foregroundStyle(Palette.teal)
+                        Label(claim.kind.rawValue, systemImage: claim.kind.icon).font(.system(size: 10)).foregroundStyle(Palette.accent)
                         Spacer()
                         Text(DayKey.string(ClaimPeriodFilter.date(for: claim))).font(.system(size: 9)).foregroundStyle(Palette.muted)
                     }
@@ -248,8 +248,8 @@ struct WorkspaceView: View {
                     .buttonStyle(.plain).foregroundStyle(Palette.muted).help("预览报销清单").padding(.trailing, 6)
             }
         }.frame(maxWidth: .infinity)
-            .background(selectedID == claim.id ? Palette.teal.opacity(0.07) : .clear, in: RoundedRectangle(cornerRadius: 10))
-            .overlay(RoundedRectangle(cornerRadius: 10).stroke(selectedID == claim.id ? Palette.teal.opacity(0.3) : Palette.ink.opacity(0.07)))
+            .background(selectedID == claim.id ? Palette.accent.opacity(0.07) : .clear, in: RoundedRectangle(cornerRadius: 10))
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(selectedID == claim.id ? Palette.accent.opacity(0.3) : Palette.ink.opacity(0.07)))
             .contentShape(Rectangle())
             .contextMenu {
                 Button("预览清单", systemImage: "eye") { summary = claim }
@@ -310,10 +310,9 @@ struct ClaimTextPreview: View {
             HStack {
                 Label("报销清单预览", systemImage: "doc.plaintext").font(.system(size: 15, weight: .semibold))
                 Spacer()
-                Button(copied ? "已复制" : (person == nil ? "复制总览" : "复制个人清单")) {
+                PreviewIconButton(title: copied ? "已复制" : (person == nil ? "复制总览" : "复制个人清单"), icon: copied ? "checkmark" : "doc.on.doc") {
                     NSPasteboard.general.clearContents(); NSPasteboard.general.setString(text, forType: .string); copied = true
                 }
-                Button("关闭", action: close).keyboardShortcut(.cancelAction)
             }.padding(18).background(.white)
             Divider()
             HStack(spacing: 16) {
@@ -328,7 +327,7 @@ struct ClaimTextPreview: View {
                         .onChange(of: selectedPersonID) { _, id in withAnimation { reader.scrollTo(id, anchor: .center) } }
                 }
                 VStack(alignment: .trailing, spacing: 5) {
-                    Text(Money.format(person?.total(in: claim) ?? claim.total)).font(.system(size: 19, weight: .semibold, design: .rounded)).foregroundStyle(Palette.teal)
+                    Text(Money.format(person?.total(in: claim) ?? claim.total)).font(.system(size: 19, weight: .semibold, design: .rounded)).foregroundStyle(Palette.accent)
                     Text("\(person?.invoiceCount ?? claim.invoiceCount) 份发票 · 票面 \(Money.format(person?.invoiceTotal ?? claim.invoiceTotal))")
                         .font(.system(size: 10)).foregroundStyle(Palette.muted)
                 }
@@ -340,14 +339,15 @@ struct ClaimTextPreview: View {
             }.id(selectedPersonID)
         }.background(Palette.canvas)
             .onChange(of: selectedPersonID) { _, _ in copied = false }
+            .onExitCommand(perform: close)
     }
     private func summaryTab(_ title: String, id: String) -> some View {
         Button { selectedPersonID = id } label: {
             Text(title).font(.system(size: 12, weight: selectedPersonID == id ? .semibold : .regular))
                 .lineLimit(1).fixedSize().padding(.horizontal, 14).padding(.vertical, 8)
-                .foregroundStyle(selectedPersonID == id ? Palette.teal : Palette.muted)
-                .background(selectedPersonID == id ? Palette.teal.opacity(0.08) : .clear, in: RoundedRectangle(cornerRadius: 8))
-                .overlay(RoundedRectangle(cornerRadius: 8).stroke(selectedPersonID == id ? Palette.teal.opacity(0.3) : .clear))
+                .foregroundStyle(selectedPersonID == id ? Palette.accent : Palette.muted)
+                .background(selectedPersonID == id ? Palette.accent.opacity(0.08) : .clear, in: RoundedRectangle(cornerRadius: 8))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(selectedPersonID == id ? Palette.accent.opacity(0.3) : .clear))
                 .contentShape(Rectangle())
         }.buttonStyle(.plain).id(id)
             .accessibilityAddTraits(selectedPersonID == id ? .isSelected : [])

@@ -205,6 +205,14 @@ cython_debug/
 # Temporary file for partial code execution
 tempCodeRunnerFile.py
 
+# macOS / Swift build products
+.DS_Store
+.build/
+.swiftpm/
+.idea/
+output/
+*.xcuserstate
+
 # Ruff stuff:
 .ruff_cache/
 

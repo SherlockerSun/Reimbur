@@ -44,13 +44,19 @@ enum WordExporter {
             let claim = source.withPeopleAssigned
             pageBreak()
             body += paragraph(claim.title, style: "Title")
-            body += paragraph("\(claim.kind.rawValue)报销　\(claim.dateSummary)")
+            body += paragraph(claim.kind == .allowance ? "补助报销" : "\(claim.kind.rawValue)报销　\(claim.dateSummary)")
             if !(claim.travelerNames ?? []).isEmpty || claim.kind == .trip {
                 body += paragraph("\(claim.kind == .trip ? "出差人" : "报销人")：\((claim.travelerNames ?? []).joined(separator: "、"))　共 \(claim.travelerCount) 人")
             }
             body += paragraph("报销总额：\(Money.format(claim.total))　发票：\(claim.invoiceCount) 份　发票金额：\(Money.format(claim.invoiceTotal))")
             body += paragraph("差额（报销总额 − 发票金额）：\(Money.format(claim.difference))")
             if !claim.note.isEmpty { body += paragraph("备注：\(claim.note)") }
+            if claim.kind == .meal {
+                for expense in claim.expenses { body += paragraph("报销计算：\(expense.formula(in: claim)) = \(Money.format(expense.total(in: claim)))") }
+                body += paragraph("清单报销单金额合计：\(Money.format(claim.ledgerReimbursementTotal))；与天数 × 单价的报销总额独立。")
+            } else if claim.kind == .allowance {
+                body += paragraph("报销总额单独填写；清单报销单金额合计：\(Money.format(claim.ledgerReimbursementTotal))，与报销总额独立。")
+            }
             let widths = [1400, 4600, 1700, 2000]
             func row(_ cells: [String], header: Bool) -> String {
                 "<w:tr>\(header ? "<w:trPr><w:tblHeader/></w:trPr>" : "")" + zip(cells, widths).map { text, width in
@@ -63,14 +69,23 @@ enum WordExporter {
             <w:tblCellMar><w:top w:w="100" w:type="dxa"/><w:left w:w="100" w:type="dxa"/><w:bottom w:w="100" w:type="dxa"/><w:right w:w="100" w:type="dxa"/></w:tblCellMar></w:tblPr>
             <w:tblGrid>\(widths.map { "<w:gridCol w:w=\"\($0)\"/>" }.joined())</w:tblGrid>
             """
+            if claim.kind != .trip, claim.invoiceLedgerEntries != nil {
+                body += row(["日期 / 姓名", "发票号码、明细及用途", "报销单金额", "发票金额"], header: true)
+                for item in claim.invoiceLedgerRows {
+                    body += row(["\(item.entry.date)\n\(item.entry.claimant ?? "未填写")",
+                                 [item.invoice?.number ?? "未填写发票号码", item.entry.detail, item.purpose].filter { !$0.isEmpty }.joined(separator: "\n"),
+                                 Money.format(item.entry.reimbursementAmount), Money.format(item.invoice?.amount ?? 0)], header: false)
+                }
+            } else {
             body += row(["费用项目", "报销人、计算方式及行程", "金额", "发票"], header: true)
             for expense in claim.expenses {
                 let route = expense.kind.hasRoute ? "\(expense.origin) → \(expense.destination)\n" : ""
                 let owner = expense.claimant.map { "报销人：\($0)\n" } ?? ""
                 body += row([expense.kind.rawValue, owner + route + expense.formula(in: claim), Money.format(expense.total(in: claim)), "\(expense.invoices.count) 份 / \(Money.format(expense.invoiceTotal))"], header: false)
             }
+            }
             body += "</w:tbl>"
-            if claim.personBreakdowns.contains(where: { $0.claimant != nil }) {
+            if claim.kind == .trip && claim.personBreakdowns.contains(where: { $0.claimant != nil }) {
                 body += paragraph("个人汇总")
                 for person in claim.personBreakdowns {
                     body += paragraph("\(person.name)：报销 \(Money.format(person.total(in: claim)))　发票 \(person.invoiceCount) 份　票面 \(Money.format(person.invoiceTotal))")

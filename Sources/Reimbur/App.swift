@@ -30,11 +30,13 @@ import AppKit
 struct WorkspaceView: View {
     @EnvironmentObject private var store: ClaimStore
     @AppStorage("recordsCollapsed") private var recordsCollapsed = false
+    @AppStorage("menuCollapsed") private var menuCollapsed = false
     @AppStorage("startupPage") private var startupPage = "home"
     @AppStorage("sidebarCaption") private var sidebarCaption = AppPreferences.defaultCaption
     @State private var didAppear = false
     @State private var home = true
     @State private var filter: ClaimKind?
+    @State private var statusFilter: ClaimStatus?
     @State private var selectedID: UUID?
     @State private var search = ""
     @State private var period = ClaimPeriodFilter()
@@ -45,8 +47,7 @@ struct WorkspaceView: View {
     @State private var newTitle = ""
     @State private var summary: Claim?
     private var filtered: [Claim] {
-        store.claims.filter { (filter == nil || $0.kind == filter) && period.matches($0) &&
-            (search.isEmpty || $0.title.localizedCaseInsensitiveContains(search) || $0.note.localizedCaseInsensitiveContains(search) || ($0.travelerNames ?? []).contains { $0.localizedCaseInsensitiveContains(search) }) }
+        store.claims.filter(ClaimRecordFilter(kind: filter, status: statusFilter, period: period, search: search).matches)
             .sorted { $0.createdAt > $1.createdAt }
     }
     var body: some View {
@@ -70,6 +71,7 @@ struct WorkspaceView: View {
             }
         }
         .animation(.easeInOut(duration: 0.32), value: recordsCollapsed)
+        .animation(.easeInOut(duration: 0.26), value: menuCollapsed)
         .background(Palette.canvas).foregroundStyle(Palette.ink).textFieldStyle(.roundedBorder)
         .overlay(alignment: .topTrailing) {
             if !home && !store.showSettings {
@@ -79,10 +81,10 @@ struct WorkspaceView: View {
         .alert("操作未完成", isPresented: Binding(get: { store.errorMessage != nil }, set: { if !$0 { store.errorMessage = nil } })) {
             Button("知道了") { store.errorMessage = nil }
         } message: { Text(store.errorMessage ?? "") }
-        .alert(store.exportSuccess?.pathExtension == "zip" ? "发票已导出" : "Word 已导出", isPresented: Binding(get: { store.exportSuccess != nil }, set: { if !$0 { store.exportSuccess = nil } })) {
+        .alert(store.exportSuccess?.pathExtension == "zip" ? "发票已导出" : store.exportSuccess?.pathExtension == "xlsx" ? "报销清单已导出" : "打印文档已导出", isPresented: Binding(get: { store.exportSuccess != nil }, set: { if !$0 { store.exportSuccess = nil } })) {
             Button("在 Finder 中显示") { if let url = store.exportSuccess { NSWorkspace.shared.activateFileViewerSelecting([url]) }; store.exportSuccess = nil }
             Button("完成", role: .cancel) { store.exportSuccess = nil }
-        } message: { Text(store.exportSuccess?.pathExtension == "zip" ? "当前记录的全部发票和行程单已打包，保留原始文件。" : "已按说明信息、报销单、发票与行程单顺序排版。打印布局使用设置中的导出选项。") }
+        } message: { Text(store.exportSuccess?.pathExtension == "zip" ? "当前记录的全部发票和行程单已打包，保留原始文件。" : store.exportSuccess?.pathExtension == "xlsx" ? "清单已保存为 Excel 文件，包含日期、姓名、发票号码、金额、报销单金额、明细及用途。" : "已按说明信息、报销单、发票与行程单顺序排版。打印布局使用设置中的导出选项。") }
         .alert("重命名报销记录", isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
             TextField("报销名称", text: $newTitle)
             Button("保存") { if let id = renaming { store.rename(id, to: newTitle) }; renaming = nil }
@@ -123,7 +125,7 @@ struct WorkspaceView: View {
         }
         .onChange(of: store.claims.map(\.id)) { old, new in
             if let added = new.first(where: { !old.contains($0) }) {
-                store.showSettings = false; home = false; selectedID = added; period = ClaimPeriodFilter(); search = ""
+                store.showSettings = false; home = false; selectedID = added; period = ClaimPeriodFilter(); search = ""; statusFilter = nil
                 if let kind = store.claims.first(where: { $0.id == added })?.kind, filter != nil && filter != kind { filter = kind }
             } else if !new.contains(selectedID ?? UUID()) { selectedID = filtered.first?.id }
             checked.formIntersection(new)
@@ -136,23 +138,30 @@ struct WorkspaceView: View {
 
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Reimbur").font(.system(size: 22, weight: .semibold, design: .rounded))
+            Group {
+                if menuCollapsed { Image(systemName: "doc.text").font(.system(size: 22, weight: .medium)) }
+                else { Text("Reimbur").font(.system(size: 22, weight: .semibold, design: .rounded)) }
+            }.frame(maxWidth: .infinity, alignment: menuCollapsed ? .center : .leading)
                 .frame(height: 28).padding(.bottom, 25)
-            SidebarItem(title: "首页", icon: "house", selected: home && !store.showSettings) {
+            SidebarItem(title: "首页", icon: "house", selected: home && !store.showSettings, compact: menuCollapsed) {
                 store.showSettings = false; home = true; batch = false; checked = []
             }
-            SidebarItem(title: "全部记录", icon: "tray.full", selected: !home && !store.showSettings && filter == nil, count: store.claims.count) { navigate(nil) }
+            SidebarItem(title: "全部记录", icon: "tray.full", selected: !home && !store.showSettings && filter == nil, count: store.claims.count, compact: menuCollapsed) { navigate(nil) }
             ForEach(ClaimKind.allCases) { kind in
                 SidebarItem(title: "\(kind.rawValue)报销", icon: kind.icon, selected: !home && !store.showSettings && filter == kind,
-                            count: store.claims.filter { $0.kind == kind }.count) { navigate(kind) }
+                            count: store.claims.filter { $0.kind == kind }.count, compact: menuCollapsed) { navigate(kind) }
             }
             Spacer()
-            Text(AppPreferences.caption(sidebarCaption)).font(.system(size: 11)).foregroundStyle(.white.opacity(0.45))
-                .frame(maxWidth: .infinity, alignment: .center).multilineTextAlignment(.center).lineLimit(1).padding(.bottom, 3)
-            SidebarItem(title: "设置", icon: "gearshape", selected: store.showSettings, centered: true) {
+            if !menuCollapsed {
+                Text(AppPreferences.caption(sidebarCaption)).font(.system(size: 11)).foregroundStyle(.white.opacity(0.45))
+                    .frame(maxWidth: .infinity, alignment: .center).multilineTextAlignment(.center).lineLimit(1).padding(.bottom, 3)
+            }
+            SidebarItem(title: "设置", icon: "gearshape", selected: store.showSettings, centered: true, compact: menuCollapsed) {
                 store.showSettings = true; batch = false; checked = []
             }
-        }.padding(20).padding(.top, 40).frame(width: 210)
+            SidebarItem(title: menuCollapsed ? "展开菜单栏" : "收起菜单栏", icon: menuCollapsed ? "chevron.right" : "chevron.left",
+                        selected: false, centered: true, compact: menuCollapsed) { menuCollapsed.toggle() }
+        }.padding(menuCollapsed ? 12 : 20).padding(.top, 40).frame(width: menuCollapsed ? 76 : 210)
             .background(Palette.ink).foregroundStyle(.white)
     }
     private var recordToggle: some View {
@@ -186,7 +195,16 @@ struct WorkspaceView: View {
                 HStack { Image(systemName: "magnifyingglass"); TextField("搜索名称、人员或备注", text: $search).textFieldStyle(.plain) }
                     .font(.system(size: 12)).foregroundStyle(Palette.muted).padding(9)
                     .background(Palette.canvas, in: RoundedRectangle(cornerRadius: 8))
-                PeriodPicker(claims: store.claims, period: $period)
+                HStack(spacing: 4) {
+                    PeriodPicker(claims: store.claims, period: $period)
+                    Picker("状态", selection: $statusFilter) {
+                        Text("全部状态").tag(nil as ClaimStatus?)
+                        ForEach(ClaimStatus.allCases) { status in
+                            Text(status.rawValue).tag(Optional(status))
+                        }
+                    }.labelsHidden().font(.system(size: 11)).frame(width: 82)
+                        .accessibilityIdentifier("claim-status-filter")
+                }.controlSize(.small)
                 HStack {
                     Text("\(filtered.count) 条记录").foregroundStyle(Palette.muted)
                     Spacer()
@@ -206,7 +224,7 @@ struct WorkspaceView: View {
             ScrollView {
                 LazyVStack(spacing: 8) {
                     ForEach(filtered) { claim in row(claim) }
-                    if filtered.isEmpty { Text("暂无匹配记录\n点击新建开始记录，或调整时间筛选").font(.system(size: 12)).foregroundStyle(Palette.muted).multilineTextAlignment(.center).padding(.top, 60) }
+                    if filtered.isEmpty { Text("暂无匹配记录\n点击新建开始记录，或调整筛选条件").font(.system(size: 12)).foregroundStyle(Palette.muted).multilineTextAlignment(.center).padding(.top, 60) }
                 }.padding(12)
             }
         }.frame(width: 280).background(.white)
@@ -223,42 +241,52 @@ struct WorkspaceView: View {
         }
     }
     private func row(_ claim: Claim) -> some View {
-        ZStack {
+        VStack(alignment: .leading, spacing: 0) {
             Button {
                 if batch { if checked.contains(claim.id) { checked.remove(claim.id) } else { checked.insert(claim.id) } }
                 else { selectedID = claim.id }
             } label: {
-                VStack(alignment: .leading, spacing: 12) {
+                VStack(alignment: .leading, spacing: 10) {
                     HStack {
-                        Label(claim.kind.rawValue, systemImage: claim.kind.icon).font(.system(size: 10)).foregroundStyle(Palette.accent)
+                        Label(claim.kind.rawValue, systemImage: claim.kind.icon).font(.system(size: 10)).foregroundStyle(claim.status.color)
                         Spacer()
                         Text(DayKey.string(ClaimPeriodFilter.date(for: claim))).font(.system(size: 9)).foregroundStyle(Palette.muted)
                     }
                     Text(claim.title.isEmpty ? "未命名报销" : claim.title).font(.system(size: 13, weight: .medium)).lineLimit(2).multilineTextAlignment(.leading)
                     Text(Money.format(claim.total)).font(.system(size: 17, weight: .semibold, design: .rounded))
-                    Text("\(claim.invoiceCount) 份发票").font(.system(size: 10)).foregroundStyle(Palette.muted)
+                    Text(claim.recordDetail).font(.system(size: 10)).foregroundStyle(Palette.muted)
+                        .lineLimit(1).minimumScaleFactor(0.75)
                 }.frame(maxWidth: .infinity, alignment: .leading).padding(14)
-                    .padding(.leading, batch ? 24 : 0).padding(.trailing, 26).contentShape(Rectangle())
+                    .padding(.bottom, -5).contentShape(Rectangle())
             }.buttonStyle(.plain)
             HStack {
                 if batch {
                     Toggle("选择记录", isOn: Binding(get: { checked.contains(claim.id) }, set: { if $0 { checked.insert(claim.id) } else { checked.remove(claim.id) } }))
-                        .toggleStyle(.checkbox).labelsHidden().padding(.leading, 12)
+                        .toggleStyle(.checkbox).labelsHidden()
                 }
+                ClaimStatusMenu(status: claim.status) { store.setStatus($0, for: claim.id) }
                 Spacer()
-                Button { summary = claim } label: { Image(systemName: "eye").frame(width: 32, height: 40) }
-                    .buttonStyle(.plain).foregroundStyle(Palette.muted).help("预览报销清单").padding(.trailing, 6)
-            }
+            }.padding(.horizontal, 14).padding(.bottom, 10)
         }.frame(maxWidth: .infinity)
-            .background(selectedID == claim.id ? Palette.accent.opacity(0.07) : .clear, in: RoundedRectangle(cornerRadius: 10))
-            .overlay(RoundedRectangle(cornerRadius: 10).stroke(selectedID == claim.id ? Palette.accent.opacity(0.3) : Palette.ink.opacity(0.07)))
+            .background(claim.status.color.opacity(selectedID == claim.id ? 0.12 : 0.035), in: RoundedRectangle(cornerRadius: 10))
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(claim.status.color.opacity(selectedID == claim.id ? 0.6 : 0.18)))
+            .overlay(alignment: .leading) { Capsule().fill(claim.status.color).frame(width: 3).padding(.vertical, 12) }
             .contentShape(Rectangle())
+            .onTapGesture {
+                if batch { if checked.contains(claim.id) { checked.remove(claim.id) } else { checked.insert(claim.id) } }
+                else { selectedID = claim.id }
+            }
             .contextMenu {
                 Button("预览清单", systemImage: "eye") { summary = claim }
                 Button("复制清单", systemImage: "doc.on.doc") { copySummary(claim) }
                 Button("导出发票", systemImage: "archivebox") { store.exportInvoices(claim) }
                     .disabled(store.exporting || claim.expenses.flatMap(\.attachments).isEmpty)
                 Divider()
+                Menu("切换状态") {
+                    ForEach(ClaimStatus.allCases) { status in
+                        Button(status.rawValue, systemImage: status == claim.status ? "checkmark" : status.icon) { store.setStatus(status, for: claim.id) }
+                    }
+                }
                 Button("重命名", systemImage: "pencil") { newTitle = claim.title; renaming = claim.id }
                 Button("删除记录", systemImage: "trash", role: .destructive) { deleting = [claim.id] }
             }
@@ -268,7 +296,7 @@ struct WorkspaceView: View {
         if !filtered.contains(where: { $0.id == selectedID }) { selectedID = filtered.first?.id }
     }
     private func create(_ kind: ClaimKind) {
-        if let id = store.create(kind, defaults: ExpenseDefaults.saved()) { store.showSettings = false; home = false; selectedID = id; search = ""; period = ClaimPeriodFilter(); batch = false; checked = [] }
+        if let id = store.create(kind, defaults: ExpenseDefaults.saved()) { store.showSettings = false; home = false; selectedID = id; search = ""; period = ClaimPeriodFilter(); statusFilter = nil; batch = false; checked = [] }
     }
 }
 
@@ -278,16 +306,19 @@ private struct SidebarItem: View {
     var selected: Bool
     var count: Int? = nil
     var centered = false
+    var compact = false
     var action: () -> Void
     @State private var hovering = false
     var body: some View {
         Button(action: action) {
-            HStack(spacing: centered ? 5 : 10) {
-                if centered { Spacer(minLength: 0) }
+            HStack(spacing: compact ? 0 : centered ? 5 : 10) {
+                if centered && !compact { Spacer(minLength: 0) }
                 Image(systemName: icon).frame(width: 20)
-                Text(title).font(.system(size: 12, weight: selected ? .semibold : .regular))
-                Spacer()
-                if !centered, let count { Text("\(count)").font(.system(size: 10)).foregroundStyle(.white.opacity(0.5)) }
+                if !compact {
+                    Text(title).font(.system(size: 12, weight: selected ? .semibold : .regular)).lineLimit(1)
+                    Spacer()
+                    if !centered, let count { Text("\(count)").font(.system(size: 10)).foregroundStyle(.white.opacity(0.5)) }
+                }
             }.padding(12).frame(maxWidth: .infinity)
                 .background(.white.opacity(selected ? 0.16 : (hovering ? 0.09 : 0)), in: RoundedRectangle(cornerRadius: 8)).contentShape(Rectangle())
         }.buttonStyle(.plain).onHover { hovering = $0 }.help(title).accessibilityLabel(title)

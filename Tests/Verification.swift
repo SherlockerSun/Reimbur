@@ -49,6 +49,14 @@ private struct AttachmentNameInteractionView: View {
     var body: some View { EditableAttachmentName(attachment: state.attachment, rename: rename).padding(20).frame(width: 500, height: 80).background(.white) }
 }
 
+@MainActor private final class LedgerDateState: ObservableObject {
+    @Published var value = "2026-08-24"
+}
+private struct LedgerDateInteractionView: View {
+    @ObservedObject var state: LedgerDateState
+    var body: some View { LedgerDateField(value: $state.value).frame(width: 122).padding(20).background(.white) }
+}
+
 final class ReimburChecks {
     private var temporary: URL!
     func setUpWithError() throws {
@@ -56,6 +64,533 @@ final class ReimburChecks {
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
     }
     func tearDownWithError() throws { try FileManager.default.removeItem(at: temporary) }
+
+    @MainActor func testCompactMealInfoAndMenuNavigation() throws {
+        let qa = ProcessInfo.processInfo.environment["REIMBUR_QA_DIR"].map { URL(fileURLWithPath: $0) } ?? temporary!
+        try FileManager.default.createDirectory(at: qa, withIntermediateDirectories: true)
+        let suite = "Reimbur-compact-menu-\(UUID())"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set("records", forKey: "startupPage")
+        let store = ClaimStore(root: temporary)
+        var meal = Claim.make(.meal)
+        meal.setTravelerNames(["孙毅强"])
+        meal.expenses[0].unitPrice = 3000
+        meal.dates = Set((1...20).map { String(format: "2026-08-%02d", $0) })
+        expectTrue(store.save(meal))
+        try captureView(WorkspaceView().environmentObject(store).defaultAppStorage(defaults).preferredColorScheme(.light).tint(Palette.accent),
+                        width: 1440, height: 1000, to: qa.appendingPathComponent("menu-expanded.png")) { window, host in
+            @MainActor func pickers(_ view: NSView) -> [NSPopUpButton] {
+                (view as? NSPopUpButton).map { [$0] } ?? view.subviews.flatMap(pickers)
+            }
+            let filters = pickers(host).filter { picker in ["所有年份", "所有月份", "全部状态"].contains { picker.itemTitles.contains($0) } }
+            expectEqual(filters.count, 3)
+            let tops = filters.map { host.convert($0.bounds.origin, from: $0).y }
+            expectLessThan((tops.max() ?? 0) - (tops.min() ?? 0), 4)
+            @MainActor func snapshot(_ name: String) {
+                let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds)!
+                host.cacheDisplay(in: host.bounds, to: bitmap)
+                try? bitmap.representation(using: .png, properties: [:])?.write(to: qa.appendingPathComponent(name))
+            }
+            snapshot("meal-and-filter-row.png")
+            nativeClick(NSPoint(x: 100, y: 958), in: host, window: window); pumpNativeEvents(0.4)
+            expectTrue(defaults.bool(forKey: "menuCollapsed"))
+            snapshot("menu-icons.png")
+            nativeClick(NSPoint(x: 38, y: 924), in: host, window: window)
+            expectTrue(store.showSettings)
+            nativeClick(NSPoint(x: 38, y: 970), in: host, window: window); pumpNativeEvents(0.4)
+            expectFalse(defaults.bool(forKey: "menuCollapsed"))
+            nativeClick(NSPoint(x: 80, y: 194), in: host, window: window)
+            expectFalse(store.showSettings)
+        }
+    }
+
+    @MainActor func testUndatedAllowanceMigrationAndIndependentAmount() throws {
+        var legacy = Claim.make(.allowance, date: DayKey.date("2026-10-24")!)
+        legacy.allowanceAmount = nil; legacy.invoiceLedgerEntries = nil
+        legacy.setTravelerNames(["张三"])
+        legacy.dates = ["2026-08-24", "2026-08-25"]
+        legacy.expenses[0].unitPrice = 3000
+        try Database(root: temporary).save(legacy)
+        let store = ClaimStore(root: temporary)
+        var claim = store.claims[0]
+        expectEqual(claim.allowanceAmount, 6000)
+        claim.dates = []
+        expectEqual(claim.total, 6000)
+        claim.allowanceAmount = 123456
+        let pdf = temporary.appendingPathComponent("补助.pdf")
+        try makePDF(at: pdf, pages: 1, number: "26337000000777118119", amount: "241.00")
+        claim = try store.importFiles([pdf], into: claim, expenseID: claim.expenses[0].id)
+        expectEqual(claim.total, 123456)
+        expectEqual(claim.invoiceTotal, 24100)
+        expectEqual(claim.reimbursementDayCount, 0)
+        expectTrue(claim.reimbursementDates.isEmpty)
+        expectFalse(claim.recordDetail.contains("天"))
+        expectTrue(ClaimPeriodFilter(year: 2026, month: 10).matches(claim))
+        claim.invoiceLedgerEntries?[0].reimbursementAmount = 13525
+        claim.expenses[0].invoices[0].amount = 25000
+        expectTrue(store.save(claim))
+        expectEqual(claim.total, 123456)
+        expectEqual(claim.difference, 98456)
+        let reopened = ClaimStore(root: temporary).claims[0]
+        expectEqual(reopened.allowanceAmount, 123456)
+        expectEqual(reopened.ledgerReimbursementTotal, 13525)
+        let summary = ClaimSummary.renderOverview(reopened)
+        expectTrue(summary.contains("报销总额（单独填写）：1234.56"))
+        expectFalse(summary.contains("天 ×"))
+        expectFalse(summary.contains("日期："))
+        let printFile = temporary.appendingPathComponent("undated.docx")
+        try WordExporter.export(claims: [reopened], attachmentRoot: store.root.appendingPathComponent("Attachments"), to: printFile)
+        let extracted = temporary.appendingPathComponent("print")
+        try run("/usr/bin/ditto", ["-x", "-k", printFile.path, extracted.path])
+        let xml = try String(contentsOf: extracted.appendingPathComponent("word/document.xml"), encoding: .utf8)
+        expectFalse(xml.contains("天 ×"))
+        expectFalse(xml.contains("尚未选择日期"))
+        let removed = store.removeAttachment(reopened.expenses[0].invoices[0], from: reopened, expenseID: reopened.expenses[0].id)!
+        expectEqual(removed.total, 123456)
+        expectEqual(removed.invoiceCount, 0)
+        expectEqual(removed.invoiceLedgerRows.count, 0)
+        let fresh = Claim.make(.allowance)
+        expectEqual(fresh.total, 0)
+        expectEqual(fresh.allowanceAmount, 0)
+    }
+
+    @MainActor func testUndatedAllowanceEditorAndMealInfoLayout() throws {
+        let qa = ProcessInfo.processInfo.environment["REIMBUR_QA_DIR"].map { URL(fileURLWithPath: $0) } ?? temporary!
+        let store = ClaimStore(root: temporary)
+        var allowance = Claim.make(.allowance)
+        allowance.setTravelerNames(["孙毅强"])
+        allowance.allowanceAmount = 123456
+        expectTrue(store.save(allowance))
+        try captureView(ClaimEditor(claim: allowance).environmentObject(store).background(Palette.canvas).tint(Palette.accent),
+                        width: 950, height: 1000, to: qa.appendingPathComponent("allowance-manual-amount.png")) { window, host in
+            @MainActor func fields(_ view: NSView) -> [NSTextField] {
+                (view as? NSTextField).map { [$0] } ?? view.subviews.flatMap(fields)
+            }
+            guard let amount = fields(host).first(where: { $0.stringValue == "1234.56" }) else { fail("Manual allowance amount missing"); return }
+            expectFalse(fields(host).contains { $0.stringValue == "0.00" })
+            nativeClick(host.convert(NSPoint(x: amount.bounds.midX, y: amount.bounds.midY), from: amount), in: host, window: window)
+            guard let editor = window.firstResponder as? NSTextView else { fail("Manual allowance amount not editable"); return }
+            editor.selectAll(nil); editor.insertText("2000.00", replacementRange: NSRange(location: NSNotFound, length: 0))
+            window.makeFirstResponder(nil); pumpNativeEvents()
+            guard let purpose = fields(host).first(where: { $0.placeholderString == "填写用途，应用至清单每一行" }) else { fail("Purpose missing"); return }
+            nativeClick(host.convert(NSPoint(x: purpose.bounds.midX, y: purpose.bounds.midY), from: purpose), in: host, window: window)
+            (window.firstResponder as? NSTextView)?.insertText("电脑报销", replacementRange: NSRange(location: NSNotFound, length: 0))
+            window.makeFirstResponder(nil); pumpNativeEvents()
+            expectEqual(store.claims.first { $0.id == allowance.id }?.allowanceAmount, 200000)
+            expectEqual(store.claims.first { $0.id == allowance.id }?.ledgerPurpose, "电脑报销")
+        }
+        var meal = Claim.make(.meal)
+        meal.setTravelerNames(["孙毅强"])
+        meal.dates = Set((1...20).map { String(format: "2026-08-%02d", $0) })
+        meal.expenses[0].unitPrice = 3000
+        expectTrue(store.save(meal))
+        try captureView(ClaimEditor(claim: meal).environmentObject(store).background(Palette.canvas).tint(Palette.accent),
+                        width: 1250, height: 1000, to: qa.appendingPathComponent("meal-compact-info.png"))
+        try captureView(DashboardView(claims: store.claims, period: .constant(ClaimPeriodFilter())).background(Palette.canvas).tint(Palette.accent),
+                        width: 1150, height: 900, to: qa.appendingPathComponent("dashboard-subtitle.png"))
+    }
+
+    @MainActor func testLedgerAttachmentLayoutAndCalendarEditing() throws {
+        let qa = ProcessInfo.processInfo.environment["REIMBUR_QA_DIR"].map { URL(fileURLWithPath: $0) } ?? temporary!
+        let store = ClaimStore(root: temporary.appendingPathComponent("db"))
+        var claim = Claim.make(.meal)
+        claim.dates = ["2026-08-24", "2026-08-25"]
+        claim.expenses[0].unitPrice = 3000
+        claim.setTravelerNames(["孙毅强", "张三"])
+        let pdf = temporary.appendingPathComponent("餐补.pdf")
+        try makePDF(at: pdf, pages: 1, number: "26337000000777118119", amount: "241.00")
+        claim = try store.importFiles([pdf], into: claim, expenseID: claim.expenses[0].id)
+        try captureView(ClaimEditor(claim: claim).environmentObject(store).background(Palette.canvas).tint(Palette.accent),
+                        width: 1250, height: 1350, to: qa.appendingPathComponent("meal-attachments.png")) { window, host in
+            @MainActor func fields(_ view: NSView) -> [NSTextField] {
+                (view as? NSTextField).map { [$0] } ?? view.subviews.flatMap(fields)
+            }
+            let amounts = fields(host).filter { $0.stringValue == "241.00" }
+                .sorted { host.convert($0.bounds.origin, from: $0).y < host.convert($1.bounds.origin, from: $1).y }
+            guard amounts.count == 3, let attachmentAmount = amounts.last else { fail("Expected ledger amounts and independent attachment amount field"); return }
+            nativeClick(host.convert(NSPoint(x: attachmentAmount.bounds.midX, y: attachmentAmount.bounds.midY), from: attachmentAmount), in: host, window: window)
+            guard let editor = window.firstResponder as? NSTextView else { fail("Attachment amount not editable"); return }
+            editor.selectAll(nil); editor.insertText("250.00", replacementRange: NSRange(location: NSNotFound, length: 0))
+            window.makeFirstResponder(nil); pumpNativeEvents()
+            let saved = store.claims.first { $0.id == claim.id }!
+            expectEqual(saved.invoiceLedgerRows.first?.invoice?.amount, 25000)
+            expectEqual(saved.total, 6000)
+            expectEqual(saved.ledgerReimbursementTotal, 24100)
+            expectEqual(fields(host).filter { $0.stringValue == "250.00" }.count, 2)
+        }
+        var allowance = store.claims.first { $0.id == claim.id }!
+        allowance.id = UUID(); allowance.kind = .allowance; allowance.title = "补助报销20260824"
+        allowance.reimbursementPurpose = "电脑报销"
+        try captureView(ClaimEditor(claim: allowance).environmentObject(store).background(Palette.canvas).tint(Palette.accent),
+                        width: 950, height: 1350, to: qa.appendingPathComponent("allowance-attachments-compact.png"))
+        let state = LedgerDateState()
+        try captureView(LedgerDateInteractionView(state: state), width: 162, height: 67,
+                        to: qa.appendingPathComponent("ledger-date.png")) { window, host in
+            nativeClick(NSPoint(x: 80, y: 33), in: host, window: window)
+            pumpNativeEvents(0.4)
+            @MainActor func pickers(_ view: NSView) -> [NSDatePicker] {
+                (view as? NSDatePicker).map { [$0] } ?? view.subviews.flatMap(pickers)
+            }
+            guard let calendar = NSApplication.shared.windows.compactMap(\.contentView).flatMap(pickers).first else { fail("Date popover calendar missing"); return }
+            if let content = calendar.window?.contentView {
+                let bitmap = content.bitmapImageRepForCachingDisplay(in: content.bounds)!
+                content.cacheDisplay(in: content.bounds, to: bitmap)
+                try? bitmap.representation(using: .png, properties: [:])?.write(to: qa.appendingPathComponent("ledger-date-calendar.png"))
+            }
+            calendar.dateValue = DayKey.date("2026-09-05")!
+            if let action = calendar.action { calendar.sendAction(action, to: calendar.target) }
+            pumpNativeEvents()
+            expectEqual(state.value, "2026-09-05")
+        }
+    }
+
+    @MainActor func testInvoiceLedgerPreservesLegacyAmountsAndAttachments() throws {
+        let database = try Database(root: temporary)
+        for kind in [ClaimKind.meal, .allowance] {
+            var legacy = Claim.make(kind)
+            legacy.allowanceAmount = nil
+            legacy.invoiceLedgerEntries = nil
+            legacy.setTravelerNames(["张三"])
+            legacy.dates = ["2026-10-22", "2026-10-23"]
+            legacy.expenses = [Expense(kind: kind.categories[0], unitPrice: 3000, note: "保留原说明",
+                                       invoices: [Attachment(name: "1.pdf", storedName: "1.pdf", amount: 50000), Attachment(name: "2.pdf", storedName: "2.pdf", amount: 20000)], claimant: "张三"),
+                               Expense(kind: kind.categories[0], unitPrice: 1000, claimant: "张三")]
+            legacy.status = .archived
+            try database.save(legacy)
+            let migrated = legacy.withInvoiceLedger
+            expectEqual(migrated.total, 8000)
+            expectEqual(migrated.invoiceTotal, 70000)
+            expectEqual(migrated.attachments, legacy.attachments)
+            expectEqual(migrated.invoiceLedgerEntries?.map(\.reimbursementAmount), [50000, 20000])
+            expectEqual(migrated.invoiceLedgerRows[0].entry.detail, "保留原说明")
+            expectEqual(migrated.withInvoiceLedger, migrated)
+        }
+        let store = ClaimStore(root: temporary)
+        let reloaded = ClaimStore(root: temporary)
+        expectEqual(store.claims, reloaded.claims)
+        for claim in store.claims {
+            expectEqual(claim.status, .archived)
+            expectEqual(claim.total, 8000)
+            expectEqual(claim.invoiceCount, 2)
+            expectEqual(claim.invoiceLedgerRows.count, 2)
+        }
+        var trip = sampleClaim()
+        trip.status = .pending
+        expectEqual(trip.withInvoiceLedger, trip)
+    }
+
+    @MainActor func testInvoiceLedgerBatchRecognitionEditingAndDeletion() throws {
+        let store = ClaimStore(root: temporary.appendingPathComponent("db"))
+        let first = temporary.appendingPathComponent("第一张.pdf"), second = temporary.appendingPathComponent("第二张.pdf")
+        try makePDF(at: first, pages: 1, number: "26312000002517846136", amount: "241.52")
+        try makePDF(at: second, pages: 1, number: "26332000003388662886", amount: "228.25")
+        for kind in [ClaimKind.meal, .allowance] {
+            var claim = Claim.make(kind)
+            claim.setTravelerNames(["张三", "李四"])
+            claim.dates = ["2026-10-23"]
+            claim.expenses[0].unitPrice = 6000
+            if kind == .allowance { claim.allowanceAmount = 6000 }
+            claim.reimbursementPurpose = "电脑报销"
+            claim = try store.importFiles([first, second], into: claim, expenseID: claim.expenses[0].id)
+            expectEqual(claim.invoiceLedgerRows.count, 2)
+            expectEqual(claim.invoiceLedgerRows.map { $0.invoice?.number }, ["26312000002517846136", "26332000003388662886"])
+            expectEqual(claim.invoiceLedgerRows.map { $0.invoice?.amount }, [24152, 22825])
+            expectEqual(claim.invoiceLedgerRows.map { $0.entry.claimant }, ["张三", "张三"])
+            expectEqual(claim.total, 6000)
+            expectEqual(claim.ledgerReimbursementTotal, 46977)
+            expectEqual(claim.invoiceTotal, 46977)
+            expectEqual(claim.ledgerPurpose, kind == .meal ? "餐补报销" : "电脑报销")
+            claim.invoiceLedgerEntries?[0].reimbursementAmount = 20000
+            claim.invoiceLedgerEntries?[1].reimbursementAmount = 0
+            claim.invoiceLedgerEntries?[0].detail = "电脑电源 & 适配器"
+            claim.invoiceLedgerEntries?[0].date = "2026-10-22"
+            claim.invoiceLedgerEntries?[1].claimant = "李四"
+            claim.expenses[0].invoices[0].amount = 25000
+            claim.expenses[0].invoices[0].number = "00312000002517846136"
+            expectTrue(claim.renameTraveler(from: "李四", to: "孙毅强"))
+            expectEqual(claim.invoiceLedgerEntries?[1].claimant, "孙毅强")
+            expectTrue(store.save(claim))
+            expectEqual(claim.total, 6000)
+            expectEqual(claim.ledgerReimbursementTotal, 20000)
+            expectEqual(claim.invoiceTotal, 47825)
+            let reopened = ClaimStore(root: store.root).claims.first { $0.id == claim.id }!
+            expectEqual(reopened.invoiceLedgerRows[0].invoice?.number, "00312000002517846136")
+            expectEqual(reopened.invoiceLedgerRows[0].entry.date, "2026-10-22")
+            expectEqual(reopened.invoiceLedgerRows[0].entry.detail, "电脑电源 & 适配器")
+            let summary = ClaimSummary.render(reopened)
+            expectTrue(summary.contains("报销单金额：200.00"))
+            expectFalse(summary.contains("个人汇总"))
+            let attachment = reopened.expenses[0].invoices[0]
+            claim = store.removeAttachment(attachment, from: reopened, expenseID: reopened.expenses[0].id)!
+            expectEqual(claim.invoiceLedgerRows.count, 1)
+            expectEqual(claim.total, 6000)
+            expectEqual(claim.invoiceCount, 1)
+            expectFalse(FileManager.default.fileExists(atPath: store.url(for: attachment).path))
+            let retained = ClaimStore(root: store.root).claims.first { $0.id == claim.id }!
+            let invalid = temporary.appendingPathComponent("错误.pdf")
+            try Data("invalid pdf".utf8).write(to: invalid)
+            expectThrowsError(try store.importFiles([first, invalid], into: claim, expenseID: claim.expenses[0].id))
+            expectEqual(ClaimStore(root: store.root).claims.first { $0.id == claim.id }, retained)
+        }
+    }
+
+    @MainActor func testInvoiceLedgerXLSXAndPrintExports() throws {
+        let qa = ProcessInfo.processInfo.environment["REIMBUR_QA_DIR"].map { URL(fileURLWithPath: $0) } ?? temporary!
+        try FileManager.default.createDirectory(at: qa, withIntermediateDirectories: true)
+        let store = ClaimStore(root: temporary.appendingPathComponent("db"))
+        var claim = Claim.make(.allowance)
+        claim.setTravelerNames(["孙毅强"])
+        claim.reimbursementPurpose = "电脑报销"
+        claim.dates = ["2026-10-23"]
+        claim.expenses[0].unitPrice = 6000
+        claim.allowanceAmount = 6000
+        let samples: [(String, String, Int64, Int64)] = [("26312000002517846136", "电脑电源", 24152, 24152),
+                                                       ("26332000003388662886", "电脑机箱", 22825, 22825),
+                                                       ("26117000000604791158", "电源适配器", 29610, 29610),
+                                                       ("26312000002571444631", "交换机", 3990, 3990),
+                                                       ("26332000003505153936", "内存条", 55898, 55898),
+                                                       ("00337000000368119601", "油票 & 其他", 15000, 13525)]
+        for sample in samples {
+            let source = temporary.appendingPathComponent(sample.0 + ".pdf")
+            try makePDF(at: source, pages: 1, number: sample.0, amount: Money.input(sample.2))
+            claim = try store.importFiles([source], into: claim, expenseID: claim.expenses[0].id)
+            let last = claim.invoiceLedgerEntries!.count - 1
+            claim.invoiceLedgerEntries?[last].detail = sample.1
+            claim.invoiceLedgerEntries?[last].reimbursementAmount = sample.3
+        }
+        let output = qa.appendingPathComponent("电脑报销清单.xlsx")
+        try LedgerExporter.export(claim: claim, to: output)
+        let extracted = temporary.appendingPathComponent("xlsx")
+        try run("/usr/bin/ditto", ["-x", "-k", output.path, extracted.path])
+        let document = try XMLDocument(contentsOf: extracted.appendingPathComponent("xl/worksheets/sheet1.xml"), options: [])
+        func cell(_ address: String) throws -> XMLElement { try document.nodes(forXPath: "//*[local-name()='c' and @r='\(address)']").first as! XMLElement }
+        expectEqual(try cell("D7").attribute(forName: "t")?.stringValue, "inlineStr")
+        expectEqual(try cell("D7").stringValue, "00337000000368119601")
+        expectEqual(try cell("E7").stringValue, "150.00")
+        expectEqual(try cell("F7").stringValue, "135.25")
+        expectEqual(try cell("G7").stringValue, "油票 & 其他")
+        expectEqual(try cell("B2").stringValue, String(LedgerExporter.excelDate("2026-10-23")!))
+        expectTrue((try cell("E8").stringValue ?? "").contains(Money.input(claim.invoiceTotal)))
+        expectTrue((try cell("F8").stringValue ?? "").contains(Money.input(claim.ledgerReimbursementTotal)))
+        expectNil(LedgerExporter.excelDate("2026-02-30"))
+        let printFile = temporary.appendingPathComponent("打印.docx")
+        try WordExporter.export(claims: [claim], attachmentRoot: store.root.appendingPathComponent("Attachments"), to: printFile)
+        let word = temporary.appendingPathComponent("word")
+        try run("/usr/bin/ditto", ["-x", "-k", printFile.path, word.path])
+        let printText = try String(contentsOf: word.appendingPathComponent("word/document.xml"), encoding: .utf8)
+        expectTrue(printText.contains("报销单金额"))
+        expectTrue(printText.contains("电脑机箱"))
+        expectTrue(printText.contains("电脑报销"))
+        expectFalse(printText.contains("个人汇总"))
+        try LedgerExporter.export(claim: Claim.make(.meal), to: qa.appendingPathComponent("空餐补清单.xlsx"))
+        try captureView(ClaimEditor(claim: claim).environmentObject(store).background(Palette.canvas).textFieldStyle(.roundedBorder).tint(Palette.accent),
+                        width: 1210, height: 1100, to: qa.appendingPathComponent("allowance-ledger.png"))
+        var meal = claim
+        meal.id = UUID(); meal.kind = .meal; meal.title = "餐补报销20261023"
+        try LedgerExporter.export(claim: meal, to: qa.appendingPathComponent("餐补清单.xlsx"))
+        try captureView(ClaimEditor(claim: meal).environmentObject(store).background(Palette.canvas).textFieldStyle(.roundedBorder).tint(Palette.accent),
+                        width: 950, height: 1000, to: qa.appendingPathComponent("meal-ledger.png"))
+    }
+
+    @MainActor func testInvoiceLedgerNativeEditingAndStatusChart() throws {
+        let qa = ProcessInfo.processInfo.environment["REIMBUR_QA_DIR"].map { URL(fileURLWithPath: $0) } ?? temporary!
+        let store = ClaimStore(root: temporary.appendingPathComponent("db"))
+        var claim = Claim.make(.meal)
+        claim.dates = ["2026-10-23"]
+        claim.expenses[0].unitPrice = 3000
+        claim.setTravelerNames(["孙毅强"])
+        let pdf = temporary.appendingPathComponent("餐补.pdf")
+        try makePDF(at: pdf, pages: 1, number: "26312000002517846136", amount: "241.52")
+        claim = try store.importFiles([pdf], into: claim, expenseID: claim.expenses[0].id)
+        try captureView(ClaimEditor(claim: claim).environmentObject(store).background(Palette.canvas).tint(Palette.accent),
+                        width: 1250, height: 1000, to: qa.appendingPathComponent("ledger-edited.png")) { window, host in
+            @MainActor func fields(_ view: NSView) -> [NSTextField] {
+                (view as? NSTextField).map { [$0] } ?? view.subviews.flatMap(fields)
+            }
+            guard let field = fields(host).first(where: { $0.placeholderString == "填写明细" }) else { fail("Ledger detail field missing"); return }
+            nativeClick(host.convert(NSPoint(x: field.bounds.midX, y: field.bounds.midY), from: field), in: host, window: window)
+            guard let editor = window.firstResponder as? NSTextView else { fail("Ledger detail field not editable"); return }
+            editor.insertText("工作日餐补", replacementRange: NSRange(location: NSNotFound, length: 0))
+            window.makeFirstResponder(nil); pumpNativeEvents()
+            expectEqual(store.claims.first { $0.id == claim.id }?.invoiceLedgerRows[0].entry.detail, "工作日餐补")
+            let amounts = fields(host).filter { $0.stringValue == "241.52" }.sorted { host.convert($0.bounds.origin, from: $0).x < host.convert($1.bounds.origin, from: $1).x }
+            guard let invoiceField = amounts.first, amounts.count >= 2 else { fail("Expected separate invoice and reimbursement amounts"); return }
+            nativeClick(host.convert(NSPoint(x: invoiceField.bounds.midX, y: invoiceField.bounds.midY), from: invoiceField), in: host, window: window)
+            guard let amountEditor = window.firstResponder as? NSTextView else { fail("Invoice amount not editable"); return }
+            amountEditor.selectAll(nil); amountEditor.insertText("250.00", replacementRange: NSRange(location: NSNotFound, length: 0))
+            window.makeFirstResponder(nil); pumpNativeEvents()
+            expectEqual(store.claims.first { $0.id == claim.id }?.invoiceTotal, 25000)
+            expectEqual(store.claims.first { $0.id == claim.id }?.total, 3000)
+            guard let rate = fields(host).first(where: { $0.stringValue == "30.00" }) else { fail("Daily rate field missing"); return }
+            nativeClick(host.convert(NSPoint(x: rate.bounds.midX, y: rate.bounds.midY), from: rate), in: host, window: window)
+            guard let rateEditor = window.firstResponder as? NSTextView else { fail("Daily rate not editable"); return }
+            rateEditor.selectAll(nil); rateEditor.insertText("60.00", replacementRange: NSRange(location: NSNotFound, length: 0))
+            window.makeFirstResponder(nil); pumpNativeEvents()
+            expectEqual(store.claims.first { $0.id == claim.id }?.total, 6000)
+            expectEqual(store.claims.first { $0.id == claim.id }?.invoiceTotal, 25000)
+        }
+        for status in [ClaimStatus.pending, .archived] {
+            var record = sampleClaim(); record.id = UUID(); record.status = status
+            expectTrue(store.save(record))
+        }
+        let plot = CGRect(x: 0, y: 0, width: 200, height: 200)
+        expectEqual(DashboardChartHitTesting.status(at: CGPoint(x: 180, y: 100), plot: plot, counts: [1, 1, 1]), .unreimbursed)
+        expectEqual(DashboardChartHitTesting.status(at: CGPoint(x: 100, y: 180), plot: plot, counts: [1, 1, 1]), .pending)
+        expectEqual(DashboardChartHitTesting.status(at: CGPoint(x: 20, y: 100), plot: plot, counts: [1, 1, 1]), .archived)
+        expectNil(DashboardChartHitTesting.status(at: CGPoint(x: 100, y: 100), plot: plot, counts: [1, 1, 1]))
+        expectNil(DashboardChartHitTesting.status(at: CGPoint(x: 180, y: 100), plot: plot, counts: [0, 0, 0]))
+        try captureView(DashboardView(claims: store.claims, period: .constant(ClaimPeriodFilter())).background(Palette.canvas).tint(Palette.accent),
+                        width: 1150, height: 900, to: qa.appendingPathComponent("status-donut.png")) { window, host in
+            window.acceptsMouseMovedEvents = true
+            let location = host.convert(NSPoint(x: 1040, y: 445), to: nil)
+            let enter = NSEvent.enterExitEvent(with: .mouseEntered, location: location, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil, eventNumber: 1, trackingNumber: 0, userData: nil)!
+            host.mouseEntered(with: enter)
+            let move = NSEvent.mouseEvent(with: .mouseMoved, location: location, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil, eventNumber: 2, clickCount: 0, pressure: 0)!
+            host.mouseMoved(with: move); window.sendEvent(move); pumpNativeEvents(0.4)
+        }
+        var selected: ClaimStatus?
+        try captureView(VStack(spacing: 3) {
+            ForEach(ClaimStatus.allCases) { status in ClaimStatusOption(option: status, selected: status == .unreimbursed) { selected = status } }
+        }.padding(8).frame(width: 176, height: 136).background(.white), width: 176, height: 136,
+                        to: qa.appendingPathComponent("status-menu.png")) { window, host in
+            nativeClick(NSPoint(x: 85, y: 68), in: host, window: window)
+            expectEqual(selected, .pending)
+            let location = host.convert(NSPoint(x: 85, y: 103), to: nil)
+            let enter = NSEvent.enterExitEvent(with: .mouseEntered, location: location, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil, eventNumber: 1, trackingNumber: 0, userData: nil)!
+            host.mouseEntered(with: enter)
+            let hover = NSEvent.mouseEvent(with: .mouseMoved, location: location, modifierFlags: [],
+                                           timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil, eventNumber: 200, clickCount: 0, pressure: 0)!
+            window.acceptsMouseMovedEvents = true
+            host.mouseMoved(with: hover); window.sendEvent(hover); pumpNativeEvents(0.4)
+        }
+    }
+
+    @MainActor func testClaimStatusLegacyAndSQLitePersistence() throws {
+        var original = sampleClaim()
+        original.expenses[0].invoices = [Attachment(name: "历史发票.pdf", storedName: "old.pdf", amount: 12800)]
+        var json = try JSONSerialization.jsonObject(with: JSONEncoder().encode(original)) as! [String: Any]
+        json.removeValue(forKey: "savedStatus")
+        let legacy = try JSONDecoder().decode(Claim.self, from: JSONSerialization.data(withJSONObject: json))
+        expectEqual(legacy.status, .unreimbursed)
+        expectEqual(legacy.total, original.total)
+        expectEqual(legacy.attachments, original.attachments)
+        let database = try Database(root: temporary)
+        try database.save(legacy)
+        let store = ClaimStore(root: temporary)
+        expectTrue(store.ready)
+        expectEqual(store.claims[0].status, .unreimbursed)
+        for status in ClaimStatus.allCases.reversed() {
+            expectTrue(store.setStatus(status, for: legacy.id))
+            let reloaded = ClaimStore(root: temporary).claims[0]
+            expectEqual(reloaded.status, status)
+            expectEqual(reloaded.total, original.total)
+            expectEqual(reloaded.attachments, original.attachments)
+        }
+        expectEqual(Claim.make(.meal).status, .unreimbursed)
+        expectFalse(store.setStatus(.pending, for: UUID()))
+        expectTrue(store.delete(ids: [legacy.id]))
+        expectFalse(store.setStatus(.archived, for: legacy.id))
+        expectTrue(store.claims.isEmpty)
+    }
+
+    func testClaimStatusFilteringStatisticsAndMetadata() {
+        var trip = Claim.make(.trip, date: DayKey.date("2026-10-20")!)
+        trip.title = "杭州项目"
+        trip.dates = ["2026-10-21", "2026-10-22", "2026-10-23"]
+        trip.setTravelerNames(["张三", "李四"])
+        trip.expenses = [Expense(kind: .subsidy, unitPrice: 6000, dates: ["2026-10-21"], claimant: "张三"),
+                         Expense(kind: .subsidy, unitPrice: 6000, claimant: "李四"),
+                         Expense(kind: .taxi, unitPrice: 2500,
+                                 invoices: [Attachment(name: "打车.pdf", storedName: "taxi.pdf", amount: 2500)],
+                                 itineraries: [Attachment(name: "行程单.pdf", storedName: "route.pdf", amount: 99999)], claimant: "张三")]
+        trip.status = .pending
+        expectEqual(trip.recordDetail, "3天 · 2人 · 3笔 · 1份发票")
+        var meal = Claim.make(.meal, date: DayKey.date("2026-10-20")!)
+        meal.setTravelerNames(["张三"])
+        meal.dates = ["2026-10-21", "2026-10-22"]
+        meal.expenses[0].unitPrice = 3000
+        var archived = Claim.make(.allowance, date: DayKey.date("2025-10-20")!)
+        archived.status = .archived
+        let records = [trip, meal, archived]
+        expectEqual(records.filter(ClaimRecordFilter(status: .pending).matches).map(\.id), [trip.id])
+        expectEqual(records.filter(ClaimRecordFilter(kind: .trip, status: .pending, period: ClaimPeriodFilter(year: 2026, month: 10), search: "李四").matches).map(\.id), [trip.id])
+        expectTrue(records.filter(ClaimRecordFilter(kind: .meal, status: .pending).matches).isEmpty)
+        expectTrue(records.filter(ClaimRecordFilter(status: .pending, period: ClaimPeriodFilter(year: 2025)).matches).isEmpty)
+        let statistics = ClaimStatusSummary.all(in: records, period: ClaimPeriodFilter(year: 2026, month: 10))
+        expectEqual(statistics.map(\.status), ClaimStatus.allCases)
+        expectEqual(statistics.map { $0.records.count }, [1, 1, 0])
+        expectEqual(statistics.map(\.total), [6000, 26500, 0])
+        expectEqual(statistics.map(\.invoiceTotal), [0, 2500, 0])
+        expectEqual(statistics.reduce(0) { $0 + $1.total }, trip.total + meal.total)
+        expectEqual(ClaimStatusSummary.all(in: [], period: ClaimPeriodFilter()).map { $0.records.count }, [0, 0, 0])
+    }
+
+    @MainActor func testClaimStatusNativeEditorAndScreenshots() throws {
+        let suite = "Reimbur-status-test-\(UUID())"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.set("records", forKey: "startupPage")
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = ClaimStore(root: temporary)
+        let qa = ProcessInfo.processInfo.environment["REIMBUR_QA_DIR"].map { URL(fileURLWithPath: $0) } ?? temporary!
+        var claim = sampleClaim()
+        claim.title = "杭州项目出差"
+        claim.createdAt = Date().addingTimeInterval(10)
+        expectTrue(store.save(claim))
+        var pending = Claim.make(.meal)
+        pending.status = .pending
+        pending.setTravelerNames(["张三"])
+        pending.dates = ["2026-10-23"]
+        pending.expenses[0].unitPrice = 3000
+        expectTrue(store.save(pending))
+        var archived = Claim.make(.allowance)
+        archived.status = .archived
+        expectTrue(store.save(archived))
+        let view = WorkspaceView().environmentObject(store).defaultAppStorage(defaults).preferredColorScheme(.light).tint(Palette.accent)
+        try captureView(view, width: 1440, height: 1000, to: qa.appendingPathComponent("status-records.png")) { window, host in
+            nativeClick(NSPoint(x: 274, y: 381), in: host, window: window)
+            pumpNativeEvents()
+            guard let popover = NSApplication.shared.windows.first(where: { $0.isVisible && String(describing: type(of: $0)).contains("Popover") }),
+                  let content = popover.contentView else { fail("Status button did not open its choices"); return }
+            nativeClick(NSPoint(x: content.bounds.midX, y: content.bounds.midY), in: content, window: popover)
+            pumpNativeEvents()
+            expectEqual(store.claims.first { $0.id == claim.id }?.status, .pending)
+            @MainActor func titleField(_ title: String, in view: NSView) -> NSTextField? {
+                if let field = view as? NSTextField, field.stringValue == title { return field }
+                return view.subviews.lazy.compactMap { titleField(title, in: $0) }.first
+            }
+            guard let field = titleField(claim.title, in: host) else { fail("Missing active claim editor title field"); return }
+            nativeClick(host.convert(NSPoint(x: field.bounds.midX, y: field.bounds.midY), from: field), in: host, window: window)
+            guard let editor = window.firstResponder as? NSTextView else { fail("Title did not receive focus"); return }
+            editor.selectAll(nil)
+            editor.insertText("状态切换后继续编辑", replacementRange: NSRange(location: NSNotFound, length: 0))
+            window.makeFirstResponder(nil)
+            pumpNativeEvents()
+            let saved = store.claims.first { $0.id == claim.id }!
+            expectEqual(saved.title, "状态切换后继续编辑")
+            expectEqual(saved.status, .pending)
+            expectEqual(ClaimStore(root: self.temporary).claims.first { $0.id == claim.id }?.status, .pending)
+            // Restore all three colors for the record-list screenshot.
+            expectTrue(store.setStatus(.unreimbursed, for: claim.id))
+            pumpNativeEvents()
+            @MainActor func statusPicker(in view: NSView) -> NSPopUpButton? {
+                if let picker = view as? NSPopUpButton, picker.itemTitles.contains("已归档") { return picker }
+                return view.subviews.lazy.compactMap { statusPicker(in: $0) }.first
+            }
+            guard let picker = statusPicker(in: host) else { fail("Missing native status filter"); return }
+            picker.menu?.performActionForItem(at: picker.indexOfItem(withTitle: "已归档"))
+            pumpNativeEvents()
+            expectTrue(titleField(archived.title, in: host) != nil)
+            expectNil(titleField(saved.title, in: host))
+            picker.menu?.performActionForItem(at: picker.indexOfItem(withTitle: "全部状态"))
+            pumpNativeEvents()
+            nativeClick(NSPoint(x: 300, y: 299), in: host, window: window)
+            expectTrue(titleField(saved.title, in: host) != nil)
+        }
+        defaults.set("home", forKey: "startupPage")
+        try captureView(WorkspaceView().environmentObject(store).defaultAppStorage(defaults).preferredColorScheme(.light).tint(Palette.accent),
+                        width: 1440, height: 1100, to: qa.appendingPathComponent("status-dashboard.png"))
+    }
 
     func testMoneyUsesCentsAndRejectsInvalidAmounts() {
         expectEqual(Money.parse("0.29"), 29)
@@ -92,6 +627,7 @@ final class ReimburChecks {
             var claim = Claim.make(kind)
             claim.dates = ["2026-10-01", "2026-10-03"]
             claim.expenses[0].unitPrice = 3050
+            if kind == .allowance { claim.allowanceAmount = 6100 }
             claim.expenses[0].invoices = [Attachment(name: "a.pdf", storedName: "a.pdf", amount: 7000)]
             expectEqual(claim.total, 6100)
             expectEqual(claim.difference, -900)
@@ -853,7 +1389,7 @@ final class ReimburChecks {
     @MainActor func testDailyReimbursementsKeepInvoiceTotalsIndependent() throws {
         let source = temporary.appendingPathComponent("发票.pdf")
         try makePDF(at: source, pages: 1, number: "12345678901234567890")
-        for kind in [ClaimKind.meal, .allowance] {
+        for kind in [ClaimKind.meal] {
             let root = temporary.appendingPathComponent(kind.id)
             let store = ClaimStore(root: root)
             var claim = Claim.make(kind)
@@ -1519,7 +2055,7 @@ final class ReimburChecks {
             expectTrue(defaults.bool(forKey: "recordsCollapsed"))
             click(NSPoint(x: 1152, y: 19))
             expectFalse(defaults.bool(forKey: "recordsCollapsed"))
-            click(NSPoint(x: 80, y: 720))
+            click(NSPoint(x: 80, y: 666))
             expectTrue(store.showSettings)
         }
     }
@@ -1725,6 +2261,17 @@ private func expectNoThrow<T>(_ action: @autoclosure () throws -> T, file: Stati
         NSApplication.shared.activate(ignoringOtherApps: true)
         let checks = ReimburChecks()
         let tests: [(String, () throws -> Void)] = [
+            ("Undated allowance migration and independent amount", checks.testUndatedAllowanceMigrationAndIndependentAmount),
+            ("Undated allowance editor and meal info layout", checks.testUndatedAllowanceEditorAndMealInfoLayout),
+            ("Compact meal info and menu navigation", checks.testCompactMealInfoAndMenuNavigation),
+            ("Ledger attachment layout and calendar editing", checks.testLedgerAttachmentLayoutAndCalendarEditing),
+            ("Invoice ledger legacy migration preserves amounts and attachments", checks.testInvoiceLedgerPreservesLegacyAmountsAndAttachments),
+            ("Invoice ledger batch recognition editing and deletion", checks.testInvoiceLedgerBatchRecognitionEditingAndDeletion),
+            ("Invoice ledger XLSX and print exports", checks.testInvoiceLedgerXLSXAndPrintExports),
+            ("Invoice ledger native editing and status chart", checks.testInvoiceLedgerNativeEditingAndStatusChart),
+            ("Claim status legacy decoding and SQLite persistence", checks.testClaimStatusLegacyAndSQLitePersistence),
+            ("Claim status filtering statistics and record metadata", checks.testClaimStatusFilteringStatisticsAndMetadata),
+            ("Claim status native editor synchronization and screenshots", checks.testClaimStatusNativeEditorAndScreenshots),
             ("Daily reimbursements keep invoice totals independent", checks.testDailyReimbursementsKeepInvoiceTotalsIndependent),
             ("Scanned rail ticket recognizes route and amount", checks.testScannedRailTicketRecognizesRouteAndAmount),
             ("Invoice totals, rail routes and direct hotel prices", checks.testInvoiceTotalsRoutesAndDirectHotelPrices),

@@ -8,6 +8,71 @@ enum Palette {
     static let muted = Color(red: 0.45, green: 0.50, blue: 0.53)
 }
 
+extension ClaimStatus {
+    var color: Color {
+        switch self {
+        case .unreimbursed: return Color(red: 0.82, green: 0.40, blue: 0.05)
+        case .pending: return Color(red: 0.15, green: 0.45, blue: 0.85)
+        case .archived: return Color(red: 0.12, green: 0.55, blue: 0.34)
+        }
+    }
+    var icon: String {
+        switch self {
+        case .unreimbursed: return "clock"
+        case .pending: return "hourglass"
+        case .archived: return "checkmark.seal"
+        }
+    }
+}
+
+struct ClaimStatusMenu: View {
+    var status: ClaimStatus
+    var change: (ClaimStatus) -> Void
+    @State private var showing = false
+    var body: some View {
+        Button { showing.toggle() } label: {
+            HStack(spacing: 4) {
+                Image(systemName: status.icon).frame(width: 14)
+                Text(status.rawValue)
+                Image(systemName: "chevron.down").font(.system(size: 7, weight: .semibold))
+            }.font(.system(size: 10, weight: .medium)).foregroundStyle(status.color)
+                .padding(.horizontal, 7).padding(.vertical, 5)
+                .background(status.color.opacity(0.12), in: Capsule())
+        }.buttonStyle(.plain).fixedSize()
+            .help("切换报销状态").accessibilityLabel("报销状态：\(status.rawValue)")
+            .popover(isPresented: $showing, arrowEdge: .bottom) {
+                VStack(spacing: 3) {
+                    ForEach(ClaimStatus.allCases) { option in
+                        ClaimStatusOption(option: option, selected: option == status) {
+                            showing = false
+                            change(option)
+                        }
+                    }
+                }.padding(8)
+            }
+    }
+}
+
+struct ClaimStatusOption: View {
+    var option: ClaimStatus
+    var selected: Bool
+    var action: () -> Void
+    @State private var hovering = false
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: option.icon).frame(width: 18)
+                Text(option.rawValue).frame(maxWidth: .infinity, alignment: .leading)
+                Image(systemName: "checkmark").opacity(selected ? 1 : 0).frame(width: 16)
+            }.font(.system(size: 12)).foregroundStyle(option.color)
+                .padding(9).frame(width: 156)
+                .background(option.color.opacity(hovering ? 0.17 : selected ? 0.1 : 0), in: RoundedRectangle(cornerRadius: 6))
+                .contentShape(Rectangle())
+        }.buttonStyle(.plain).onHover { hovering = $0 }
+            .animation(.easeOut(duration: 0.14), value: hovering)
+    }
+}
+
 struct ExportButtonStyle: ButtonStyle {
     var color: Color
     @Environment(\.isEnabled) private var enabled
@@ -25,9 +90,10 @@ struct ExportButtonStyle: ButtonStyle {
 struct Card<Content: View>: View {
     var height: CGFloat? = nil
     var fillHeight = false
+    var spacing: CGFloat = 16
     @ViewBuilder var content: Content
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) { content }
+        VStack(alignment: .leading, spacing: spacing) { content }
             .padding(20).frame(maxWidth: .infinity, alignment: .leading)
             .frame(height: height, alignment: .topLeading)
             .frame(maxHeight: fillHeight ? .infinity : nil, alignment: .topLeading)
@@ -65,13 +131,15 @@ struct Metric: View {
 }
 
 struct ReimbursementMetrics: View {
-    var days: Int
+    var days: Int?
     var total: Int64
     var invoiceTotal: Int64
     var invoiceCount: Int
     var body: some View {
         HStack(spacing: 12) {
-            Metric(title: "报销天数", value: "\(days) 天", icon: "calendar", background: Color(red: 0.88, green: 0.94, blue: 1))
+            if let days {
+                Metric(title: "报销天数", value: "\(days) 天", icon: "calendar", background: Color(red: 0.88, green: 0.94, blue: 1))
+            }
             Metric(title: "报销总额", value: Money.format(total), icon: "yensign.circle", background: Color(red: 0.92, green: 0.89, blue: 1))
             Metric(title: "发票总额", value: Money.format(invoiceTotal), icon: "doc.text", background: Color(red: 1, green: 0.93, blue: 0.84))
             Metric(title: "发票数量", value: "\(invoiceCount) 份", icon: "square.stack", background: Color(red: 0.86, green: 0.96, blue: 0.95))

@@ -1,5 +1,10 @@
 import Foundation
 
+enum ClaimStatus: String, Codable, CaseIterable, Identifiable {
+    case unreimbursed = "未报销", pending = "待审批", archived = "已归档"
+    var id: String { rawValue }
+}
+
 enum ClaimKind: String, Codable, CaseIterable, Identifiable {
     case trip = "出差", meal = "餐补", allowance = "补助"
     var id: String { rawValue }
@@ -80,6 +85,23 @@ struct Attachment: Codable, Identifiable, Equatable {
     var number: String?
 }
 
+struct InvoiceLedgerEntry: Codable, Identifiable, Equatable {
+    var id = UUID()
+    var expenseID: UUID
+    var invoiceID: UUID?
+    var date: String
+    var claimant: String?
+    var reimbursementAmount: Int64
+    var detail = ""
+}
+
+struct InvoiceLedgerRow: Identifiable {
+    var entry: InvoiceLedgerEntry
+    var invoice: Attachment?
+    var purpose: String
+    var id: UUID { entry.id }
+}
+
 struct Expense: Codable, Identifiable, Equatable {
     var id = UUID()
     var kind: ExpenseKind
@@ -149,6 +171,16 @@ struct Claim: Codable, Identifiable, Equatable {
     var id = UUID()
     var title: String
     var kind: ClaimKind
+    // Optional storage keeps JSON from earlier versions readable without a migration.
+    var savedStatus: ClaimStatus?
+    var invoiceLedgerEntries: [InvoiceLedgerEntry]?
+    var reimbursementPurpose: String?
+    // Independent amount for allowances; nil preserves legacy daily totals until migrated.
+    var allowanceAmount: Int64?
+    var status: ClaimStatus {
+        get { savedStatus ?? .unreimbursed }
+        set { savedStatus = newValue }
+    }
     var travelers = 1
     var travelerNames: [String]?
     var travelerCount: Int { travelerNames?.count ?? travelers }
@@ -158,6 +190,9 @@ struct Claim: Codable, Identifiable, Equatable {
               name == old || !(travelerNames ?? []).contains(name) else { return false }
         travelerNames?[index] = name
         for index in expenses.indices where expenses[index].claimant == old { expenses[index].claimant = name }
+        if invoiceLedgerEntries != nil {
+            for index in invoiceLedgerEntries!.indices where invoiceLedgerEntries![index].claimant == old { invoiceLedgerEntries![index].claimant = name }
+        }
         return true
     }
     mutating func setTravelerNames(_ names: [String]) {
@@ -187,6 +222,9 @@ struct Claim: Codable, Identifiable, Equatable {
                 expenses.append(expense)
             }
         }
+        if let first = travelerNames?.first, invoiceLedgerEntries != nil {
+            for index in invoiceLedgerEntries!.indices where invoiceLedgerEntries![index].claimant == nil { invoiceLedgerEntries![index].claimant = first }
+        }
     }
     var dates: Set<String> = []
     var note = ""
@@ -201,6 +239,8 @@ struct Claim: Codable, Identifiable, Equatable {
         var claim = Claim(title: "\(kind.rawValue)报销\(suffix)", kind: kind, createdAt: date, updatedAt: date)
         claim.setTravelerNames([])
         claim.expenses = [Expense(kind: kind.categories[0])]
+        if kind != .trip { claim.invoiceLedgerEntries = [] }
+        if kind == .allowance { claim.allowanceAmount = 0 }
         return claim
     }
     // Legacy aggregate subsidies are expanded once; originals and attachments stay on the first row.
@@ -238,6 +278,28 @@ struct Claim: Codable, Identifiable, Equatable {
         }
         return claim
     }
+    var ledgerPurpose: String { kind == .meal ? "餐补报销" : reimbursementPurpose ?? "" }
+    var ledgerReimbursementTotal: Int64 { (invoiceLedgerEntries ?? []).reduce(0) { $0 + $1.reimbursementAmount } }
+    var invoiceLedgerRows: [InvoiceLedgerRow] {
+        (invoiceLedgerEntries ?? []).map { entry in
+            InvoiceLedgerRow(entry: entry, invoice: expenses.first { $0.id == entry.expenseID }?.invoices.first { $0.id == entry.invoiceID }, purpose: ledgerPurpose)
+        }
+    }
+    // Backfill invoice metadata once; the existing daily reimbursement calculation stays independent.
+    var withInvoiceLedger: Claim {
+        guard kind != .trip, invoiceLedgerEntries == nil else { return self }
+        var claim = self
+        var entries: [InvoiceLedgerEntry] = []
+        for expense in expenses {
+            for invoice in expense.invoices {
+                entries.append(InvoiceLedgerEntry(id: invoice.id, expenseID: expense.id, invoiceID: invoice.id,
+                                                  date: expense.dates?.sorted().first ?? dates.sorted().first ?? DayKey.string(createdAt),
+                                                  claimant: expense.claimant ?? travelerNames?.first, reimbursementAmount: invoice.amount, detail: expense.note))
+            }
+        }
+        claim.invoiceLedgerEntries = entries
+        return claim
+    }
     mutating func addExpense(_ kind: ExpenseKind, unitPrice: Int64) {
         expenses.append(Expense(kind: kind, unitPrice: unitPrice, claimant: kind == .subsidy ? nil : travelerNames?.first, totalAmount: kind == .hotel ? unitPrice : nil))
         assignPeopleIfNeeded()
@@ -252,9 +314,20 @@ struct Claim: Codable, Identifiable, Equatable {
         if !unassigned.isEmpty { people.append(PersonBreakdown(claimant: nil, expenses: unassigned)) }
         return people
     }
-    var total: Int64 { expenses.reduce(0) { $0 + $1.total(in: self) } }
-    var reimbursementDayCount: Int { personBreakdowns.map { $0.days(in: self) }.max() ?? dates.count }
+    var withAllowanceTotal: Claim {
+        guard kind == .allowance, allowanceAmount == nil else { return self }
+        var claim = self
+        claim.allowanceAmount = total
+        return claim
+    }
+    var total: Int64 {
+        if kind == .allowance, let allowanceAmount { return allowanceAmount }
+        return expenses.reduce(0) { $0 + $1.total(in: self) }
+    }
+    var reimbursementDayCount: Int { kind == .allowance ? 0 : personBreakdowns.map { $0.days(in: self) }.max() ?? dates.count }
+    var recordDetail: String { (kind == .allowance ? "" : "\(reimbursementDayCount)天 · ") + "\(travelerCount)人 · \(kind != .trip ? invoiceLedgerEntries?.count ?? expenses.count : expenses.count)笔 · \(invoiceCount)份发票" }
     var reimbursementDates: Set<String> {
+        if kind == .allowance { return [] }
         let resolved = personBreakdowns.reduce(into: Set<String>()) { $0.formUnion($1.dates(in: self)) }
         return resolved.isEmpty ? dates : resolved
     }

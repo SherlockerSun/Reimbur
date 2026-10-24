@@ -17,7 +17,7 @@ struct PeriodPicker: View {
                 Text("所有月份").tag(0)
                 ForEach(1...12, id: \.self) { Text("\($0) 月").tag($0) }
             }.labelsHidden()
-        }.font(.system(size: 11)).help("按首个报销日期筛选；尚未选日期的记录按创建日期筛选")
+        }.font(.system(size: 11)).help("出差、餐补按首个报销日期筛选；补助及未选日期的记录按创建日期筛选")
     }
 }
 
@@ -25,7 +25,7 @@ struct DashboardView: View {
     var claims: [Claim]
     @Binding var period: ClaimPeriodFilter
     @State private var hoveredMonth: Date?
-    @State private var hoveredKind: ClaimKind?
+    @State private var hoveredStatus: ClaimStatus?
     @State private var hoverLocation = CGPoint.zero
     @State private var hoverAvoidance = CGRect.zero
     @State private var coordinateID = UUID()
@@ -70,14 +70,13 @@ struct DashboardView: View {
                         monthlyChart
                     }
                     Card {
-                        SectionLabel(title: "报销类型分布", subtitle: "按报销金额统计 · 单位：元")
-                        if total > 0 {
-                            distributionChart
-                        } else { Text("有报销金额后展示分布").font(.system(size: 12)).foregroundStyle(Palette.muted).frame(maxWidth: .infinity).frame(height: 245) }
-                    }.frame(width: 300)
+                        SectionLabel(title: "报销状态分布", subtitle: "按记录数统计")
+                        if !records.isEmpty { statusChart }
+                        else { Text("有报销记录后展示状态分布").font(.system(size: 12)).foregroundStyle(Palette.muted).frame(maxWidth: .infinity).frame(height: 245) }
+                    }.frame(width: 330)
                 }
                 Card {
-                    SectionLabel(title: "分类统计", subtitle: "时间筛选按首个报销日；未选日期按创建日")
+                    SectionLabel(title: "分类统计", subtitle: "出差、餐补按首个报销日；补助及未选日期的记录按创建日")
                     ForEach(ClaimKind.allCases) { kind in
                         let items = records.filter { $0.kind == kind }
                         HStack {
@@ -102,7 +101,7 @@ struct DashboardView: View {
                     }
                 }.allowsHitTesting(false)
             }
-            .onChange(of: period) { _, _ in hoveredMonth = nil; hoveredKind = nil }
+            .onChange(of: period) { _, _ in hoveredMonth = nil; hoveredStatus = nil }
     }
     private var monthlyChart: some View {
         Chart(monthly) { point in
@@ -122,7 +121,7 @@ struct DashboardView: View {
                                 guard let frame = proxy.plotFrame, geometry[frame].contains(location),
                                       let date = proxy.value(atX: location.x - geometry[frame].minX, as: Date.self) else { hoveredMonth = nil; return }
                                 hoveredMonth = monthly.first { DayKey.calendar.isDate($0.date, equalTo: date, toGranularity: .month) }?.date
-                                hoveredKind = nil
+                                hoveredStatus = nil
                                 let origin = geometry.frame(in: .named(coordinateID)).origin
                                 hoverLocation = CGPoint(x: origin.x + location.x, y: origin.y + location.y)
                                 if let selected = hoveredMonth, let x = proxy.position(forX: selected) {
@@ -141,15 +140,24 @@ struct DashboardView: View {
         .frame(height: 245)
     }
 
-    private var distributionChart: some View {
-        Chart(ClaimKind.allCases) { kind in
-            let value = records.filter { $0.kind == kind }.reduce(Int64(0)) { $0 + $1.total }
-            SectorMark(angle: .value("金额", Double(value) / 100), innerRadius: .ratio(0.62),
-                       outerRadius: .ratio(hoveredKind == kind ? 1 : 0.94), angularInset: 3)
-                .foregroundStyle(by: .value("类型", kind.rawValue))
-                .opacity(hoveredKind == nil || hoveredKind == kind ? 1 : 0.4)
+    private var statusChart: some View {
+        VStack(spacing: 10) {
+        Chart(ClaimStatusSummary.all(in: claims, period: period)) { summary in
+            SectorMark(angle: .value("记录数", summary.records.count), innerRadius: .ratio(0.62),
+                       outerRadius: .ratio(hoveredStatus == summary.status ? 1 : 0.94), angularInset: 3)
+                .foregroundStyle(summary.status.color)
+                .opacity(hoveredStatus == nil || hoveredStatus == summary.status ? 1 : 0.4)
         }
-        .chartForegroundStyleScale(["出差": Palette.accent, "餐补": Color.orange, "补助": Color.purple])
+        .chartBackground { proxy in
+            GeometryReader { geometry in
+                if let frame = proxy.plotFrame {
+                    VStack(spacing: 4) {
+                        Text("\(records.count)").font(.system(size: 26, weight: .semibold, design: .rounded))
+                        Text("条报销记录").font(.system(size: 10)).foregroundStyle(Palette.muted)
+                    }.position(x: geometry[frame].midX, y: geometry[frame].midY)
+                }
+            }.allowsHitTesting(false)
+        }
         .chartOverlay { proxy in
             GeometryReader { geometry in
                 ZStack(alignment: .topLeading) {
@@ -157,29 +165,37 @@ struct DashboardView: View {
                         .onContinuousHover { phase in
                             switch phase {
                             case .active(let location):
-                                guard let frame = proxy.plotFrame else { hoveredKind = nil; return }
+                                guard let frame = proxy.plotFrame else { hoveredStatus = nil; return }
                                 hoveredMonth = nil
                                 let origin = geometry.frame(in: .named(coordinateID)).origin
                                 hoverLocation = CGPoint(x: origin.x + location.x, y: origin.y + location.y)
                                 hoverAvoidance = geometry[frame].offsetBy(dx: origin.x, dy: origin.y)
-                                hoveredKind = DashboardChartHitTesting.kind(at: location, plot: geometry[frame], values: ClaimKind.allCases.map { kind in
-                                    records.filter { $0.kind == kind }.reduce(Int64(0)) { $0 + $1.total }
+                                hoveredStatus = DashboardChartHitTesting.status(at: location, plot: geometry[frame], counts: ClaimStatus.allCases.map { status in
+                                    records.filter { $0.status == status }.count
                                 })
-                            case .ended: hoveredKind = nil
+                            case .ended: hoveredStatus = nil
                             }
                         }
                 }
             }
         }
-        .animation(.spring(response: 0.28, dampingFraction: 0.8), value: hoveredKind)
-        .frame(height: 245)
+        .animation(.spring(response: 0.28, dampingFraction: 0.8), value: hoveredStatus)
+        HStack(spacing: 12) {
+            ForEach(ClaimStatusSummary.all(in: claims, period: period)) { summary in
+                HStack(spacing: 4) {
+                    Circle().fill(summary.status.color).frame(width: 6, height: 6)
+                    Text("\(summary.status.rawValue) \(summary.records.count)")
+                }.font(.system(size: 10)).foregroundStyle(Palette.muted)
+            }
+        }.fixedSize()
+        }.frame(height: 245)
     }
 
     private var hoverDetails: (title: String, items: [Claim])? {
         if let point = monthly.first(where: { $0.date == hoveredMonth }) {
             return (point.date.formatted(.dateTime.year().month().locale(Locale(identifier: "zh_CN"))), point.records)
         }
-        if let kind = hoveredKind { return ("\(kind.rawValue)报销", records.filter { $0.kind == kind }) }
+        if let status = hoveredStatus { return (status.rawValue, records.filter { $0.status == status }) }
         return nil
     }
 
@@ -188,7 +204,7 @@ struct DashboardView: View {
             Text(title).font(.system(size: 12, weight: .semibold))
             Text("报销总额  \(Money.format(items.reduce(0) { $0 + $1.total }))")
                 .font(.system(size: 13, weight: .semibold)).foregroundStyle(Palette.accent)
-            Text("\(items.count) 条记录 · \(items.reduce(0) { $0 + $1.reimbursementDayCount }) 天 · \(items.reduce(0) { $0 + $1.invoiceCount }) 份发票")
+            Text("\(items.count) 条记录" + (items.allSatisfy { $0.kind == .allowance } ? "" : " · \(items.reduce(0) { $0 + $1.reimbursementDayCount }) 天") + " · \(items.reduce(0) { $0 + $1.invoiceCount }) 份发票")
             Text("发票总额  \(Money.format(items.reduce(0) { $0 + $1.invoiceTotal }))")
         }.font(.system(size: 11)).foregroundStyle(Palette.ink)
             .padding(12).frame(maxWidth: .infinity, alignment: .leading)
@@ -202,6 +218,21 @@ struct DashboardView: View {
 
 // SectorMark starts at twelve o'clock and proceeds clockwise; ignore the hole and legend.
 enum DashboardChartHitTesting {
+    static func status(at point: CGPoint, plot: CGRect, counts: [Int]) -> ClaimStatus? {
+        let radius = min(plot.width, plot.height) / 2
+        let dx = point.x - plot.midX, dy = point.y - plot.midY
+        guard radius > 0, hypot(dx, dy) >= radius * 0.62, hypot(dx, dy) <= radius else { return nil }
+        let total = counts.reduce(0) { $0 + max(0, $1) }
+        guard total > 0 else { return nil }
+        let angle = (atan2(dx, -dy) + 2 * .pi).truncatingRemainder(dividingBy: 2 * .pi)
+        let value = angle / (2 * .pi) * Double(total)
+        var cumulative = 0
+        for (status, count) in zip(ClaimStatus.allCases, counts) where count > 0 {
+            cumulative += count
+            if value < Double(cumulative) { return status }
+        }
+        return nil
+    }
     static func kind(at point: CGPoint, plot: CGRect, values: [Int64]) -> ClaimKind? {
         let radius = min(plot.width, plot.height) / 2
         guard radius > 0 else { return nil }

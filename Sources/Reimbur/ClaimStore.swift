@@ -21,7 +21,7 @@ import UniformTypeIdentifiers
         do {
             let database = try Database(root: self.root)
             let loaded = try database.load()
-            claims = loaded.map { $0.withPeopleAssigned.withDirectHotelTotals }
+            claims = loaded.map { $0.withPeopleAssigned.withDirectHotelTotals.withInvoiceLedger.withAllowanceTotal }
             for (old, updated) in zip(loaded, claims) where old != updated { try database.save(updated) }
             self.database = database
             ready = true
@@ -30,7 +30,7 @@ import UniformTypeIdentifiers
 
     @discardableResult func save(_ claim: Claim) -> Bool {
         guard let database, ready, !deletedIDs.contains(claim.id) else { return false }
-        var updated = claim.withPeopleAssigned.withDirectHotelTotals
+        var updated = claim.withPeopleAssigned.withDirectHotelTotals.withInvoiceLedger.withAllowanceTotal
         updated.updatedAt = Date()
         do {
             try database.save(updated)
@@ -67,6 +67,12 @@ import UniformTypeIdentifiers
         guard !name.isEmpty else { return }
         claim.title = name
         _ = save(claim)
+    }
+
+    @discardableResult func setStatus(_ status: ClaimStatus, for id: UUID) -> Bool {
+        guard var claim = claims.first(where: { $0.id == id }) else { return false }
+        claim.status = status
+        return save(claim)
     }
 
     func url(for attachment: Attachment) -> URL { root.appendingPathComponent("Attachments").appendingPathComponent(attachment.storedName) }
@@ -122,7 +128,7 @@ import UniformTypeIdentifiers
                 guard expense.kind.acceptsInvoices else { throw ReimburError("出差补助无需上传发票。") }
             }
         } else if role == .itinerary { throw ReimburError("请选择打车费用后上传行程单。") }
-        var updated = claim.withPeopleAssigned.withDirectHotelTotals
+        var updated = claim.withPeopleAssigned.withDirectHotelTotals.withInvoiceLedger.withAllowanceTotal
         var imported: [Attachment] = []
         var recognizedAmount = false
         var routes = Set<RailRoute>()
@@ -170,6 +176,14 @@ import UniformTypeIdentifiers
                 if role == .itinerary { updated.expenses[index].itineraries = (updated.expenses[index].itineraries ?? []) + imported }
                 else {
                     updated.expenses[index].invoices += imported
+                    if updated.kind != .trip {
+                        updated.invoiceLedgerEntries = (updated.invoiceLedgerEntries ?? []) + imported.map { attachment in
+                            InvoiceLedgerEntry(id: attachment.id, expenseID: expenseID, invoiceID: attachment.id,
+                                               date: updated.dates.sorted().first ?? DayKey.string(updated.createdAt),
+                                               claimant: updated.expenses[index].claimant ?? updated.travelerNames?.first,
+                                               reimbursementAmount: attachment.amount)
+                        }
+                    }
                     if updated.expenses[index].synchronizesInvoiceTotal && (recognizedAmount || updated.expenses[index].invoiceTotalLinked == true) {
                         updated.expenses[index].synchronizeInvoiceTotal()
                     }
@@ -193,6 +207,7 @@ import UniformTypeIdentifiers
             guard let index = updated.expenses.firstIndex(where: { $0.id == expenseID }),
                   updated.expenses[index].attachments.contains(where: { $0.id == attachment.id }) else { return nil }
             updated.expenses[index].invoices.removeAll { $0.id == attachment.id }
+            updated.invoiceLedgerEntries?.removeAll { $0.invoiceID == attachment.id }
             if updated.expenses[index].invoiceTotalLinked == true { updated.expenses[index].synchronizeInvoiceTotal() }
             if updated.expenses[index].itineraries != nil { updated.expenses[index].itineraries?.removeAll { $0.id == attachment.id } }
         } else {
@@ -247,7 +262,7 @@ import UniformTypeIdentifiers
     func export(_ records: [Claim]) {
         guard !records.isEmpty, !exporting else { return }
         let panel = NSSavePanel()
-        panel.title = "导出 Word 打印文档"
+        panel.title = "导出打印文档"
         panel.allowedContentTypes = [UTType(filenameExtension: "docx")!]
         panel.nameFieldStringValue = records.count == 1 ? "\(records[0].title).docx" : "报销发票汇总.docx"
         guard panel.runModal() == .OK, let destination = panel.url else { return }
@@ -261,6 +276,22 @@ import UniformTypeIdentifiers
                 }.value
                 exporting = false
                 exportSuccess = destination
+            } catch { exporting = false; errorMessage = error.localizedDescription }
+        }
+    }
+
+    func exportLedger(_ claim: Claim) {
+        guard !exporting, claim.kind != .trip else { return }
+        let panel = NSSavePanel()
+        panel.title = "导出 XLSX 报销清单"
+        panel.allowedContentTypes = [UTType(filenameExtension: "xlsx")!]
+        panel.nameFieldStringValue = AttachmentNaming.safeStem(claim.title) + "-报销清单.xlsx"
+        guard panel.runModal() == .OK, let destination = panel.url else { return }
+        exporting = true
+        Task {
+            do {
+                try await Task.detached(priority: .userInitiated) { try LedgerExporter.export(claim: claim, to: destination) }.value
+                exporting = false; exportSuccess = destination
             } catch { exporting = false; errorMessage = error.localizedDescription }
         }
     }

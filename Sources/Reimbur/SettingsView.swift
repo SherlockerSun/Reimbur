@@ -72,7 +72,7 @@ struct SettingsView: View {
                         .font(.system(size: 11)).foregroundStyle(Palette.muted)
                 }
                 Card {
-                    SectionLabel(title: "发票导出", subtitle: "Word 按说明信息 → 报销单 → 发票与行程单排列，保留 PDF 的全部页面")
+                    SectionLabel(title: "打印文档导出", subtitle: "按说明信息 → 报销单 → 发票与行程单排列，保留 PDF 的全部页面")
                     Toggle("横向发票两张同页", isOn: $packInvoices).toggleStyle(.switch).controlSize(.small)
                     Text(packInvoices ? "较高或竖向的票据仍使用整页，保持打印可读性。" : "每张发票页面单独使用一页 A4 纸。")
                         .font(.system(size: 11)).foregroundStyle(Palette.muted)
@@ -80,7 +80,7 @@ struct SettingsView: View {
                         Text("共 \(store.claims.count) 条记录 · \(store.claims.reduce(0) { $0 + $1.invoiceCount }) 份发票")
                             .font(.system(size: 12)).foregroundStyle(Palette.muted)
                         Spacer()
-                        Button { store.export(store.claims) } label: { Label("导出全部发票", systemImage: "square.and.arrow.up") }
+                        Button { store.export(store.claims) } label: { Label("导出全部打印文档", systemImage: "square.and.arrow.up") }
                             .buttonStyle(.borderedProminent).disabled(store.claims.isEmpty || store.exporting || !store.ready)
                     }
                 }

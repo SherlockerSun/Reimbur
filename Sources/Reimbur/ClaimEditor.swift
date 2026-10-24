@@ -14,7 +14,7 @@ struct ClaimEditor: View {
 
     init(claim: Claim) {
         source = claim
-        _draft = State(initialValue: claim.withPeopleAssigned.withDirectHotelTotals)
+        _draft = State(initialValue: claim.withPeopleAssigned.withDirectHotelTotals.withInvoiceLedger.withAllowanceTotal)
         _selectedKind = State(initialValue: claim.expenseGroups.first?.kind)
     }
     var body: some View {
@@ -23,16 +23,25 @@ struct ClaimEditor: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 22) {
                     metrics
-                    InfoCalendarRow {
+                    if draft.kind == .allowance {
                         basicInfo
-                        Card(fillHeight: true) {
-                            SectionLabel(title: "报销日期", subtitle: "点击多选，按下即可拖动扫选；可跨月")
-                            CalendarPicker(selection: $draft.dates)
-                        }.frame(width: 294)
+                    } else {
+                        InfoCalendarRow {
+                            basicInfo
+                            Card(fillHeight: true) {
+                                SectionLabel(title: "报销日期", subtitle: "点击多选，按下即可拖动扫选；可跨月")
+                                CalendarPicker(selection: $draft.dates)
+                            }.frame(width: 294)
+                        }
                     }
-                    peopleSection
-                    coverSection
-                    expenseSection
+                    if draft.kind == .trip {
+                        peopleSection
+                        coverSection
+                        expenseSection
+                    } else {
+                        InvoiceLedgerView(claim: $draft, export: { store.exportLedger(draft) })
+                        ledgerAttachments
+                    }
                     HStack {
                         Image(systemName: "lock.shield").foregroundStyle(Palette.accent)
                         Text("修改自动保存至本机 · 发票金额自动识别，可手动修改 · 发票数量按 PDF 文件计")
@@ -42,6 +51,7 @@ struct ClaimEditor: View {
         }
         .onChange(of: draft) { _, new in saved = store.save(new) }
         .onChange(of: source.title) { _, new in if draft.title != new { draft.title = new } }
+        .onChange(of: source.status) { _, new in if draft.status != new { draft.status = new } }
         .overlay {
             if showingPeople {
                 DismissibleOverlay(close: { showingPeople = false }) {
@@ -68,7 +78,7 @@ struct ClaimEditor: View {
                 HStack(spacing: 7) {
                     Text("\(draft.kind.rawValue)报销").font(.system(size: 10, weight: .semibold)).foregroundStyle(Palette.accent)
                     Text("/").foregroundStyle(Palette.muted)
-                    Text("费用工作台").font(.system(size: 10)).foregroundStyle(Palette.muted)
+                    Text(draft.kind == .trip ? "费用工作台" : "报销清单").font(.system(size: 10)).foregroundStyle(Palette.muted)
                 }
                 TextField("报销名称", text: $draft.title)
                     .font(.system(size: 23, weight: .semibold)).textFieldStyle(.plain)
@@ -80,17 +90,17 @@ struct ClaimEditor: View {
             Button { store.exportInvoices(draft) } label: { Label("导出发票", systemImage: "archivebox").padding(.vertical, 4) }
                 .buttonStyle(ExportButtonStyle(color: .purple))
                 .disabled(!saved || store.exporting || draft.expenses.flatMap(\.attachments).isEmpty)
-            Button { store.export([draft]) } label: { Label("导出 Word", systemImage: "square.and.arrow.up").padding(.vertical, 4) }
+            Button { store.export([draft]) } label: { Label("导出打印文档", systemImage: "square.and.arrow.up").padding(.vertical, 4) }
                 .buttonStyle(ExportButtonStyle(color: Palette.accent)).disabled(!saved || store.exporting)
         }.padding(.horizontal, 26).padding(.top, 42).padding(.bottom, 23)
     }
 
     private var metrics: some View {
-        ReimbursementMetrics(days: draft.reimbursementDayCount, total: draft.total, invoiceTotal: draft.invoiceTotal, invoiceCount: draft.invoiceCount)
+        ReimbursementMetrics(days: draft.kind == .allowance ? nil : draft.reimbursementDayCount, total: draft.total, invoiceTotal: draft.invoiceTotal, invoiceCount: draft.invoiceCount)
     }
     private var basicInfo: some View {
-        Card(fillHeight: true) {
-            SectionLabel(title: "基本信息", subtitle: "日期、报销人与费用自动关联")
+        Card(fillHeight: true, spacing: draft.kind == .meal ? 10 : 16) {
+            SectionLabel(title: "基本信息", subtitle: draft.kind == .allowance ? "报销人与用途" : "日期、报销人与费用自动关联")
             LabeledField(title: "\(draft.kind == .trip ? "出差人" : "报销人") · \(draft.travelerCount) 人") {
                 PeopleTagInput(names: Binding(get: { draft.travelerNames ?? [] }, set: { draft.setTravelerNames($0) }),
                                rename: { draft.renameTraveler(from: $0, to: $1) })
@@ -99,20 +109,59 @@ struct ClaimEditor: View {
                 Text("历史人数：\(draft.travelers) 人。填写姓名后，人数将按标签数量自动计算。")
                     .font(.system(size: 10)).foregroundStyle(Palette.muted)
             }
+            if draft.kind == .allowance {
+                HStack(spacing: 12) {
+                    Text("报销总额（元）").font(.system(size: 11, weight: .medium)).foregroundStyle(Palette.muted)
+                    AmountField(cents: Binding(get: { draft.total }, set: { draft.allowanceAmount = $0 }))
+                        .frame(width: 160).accessibilityLabel("补助报销总额")
+                    Text("单独填写，与清单金额独立").font(.system(size: 11)).foregroundStyle(Palette.muted)
+                    Spacer(minLength: 0)
+                }
+            }
+            if draft.kind == .meal {
+                ForEach(draft.expenses) { expense in
+                    if let index = draft.expenses.firstIndex(where: { $0.id == expense.id }) {
+                        HStack(spacing: 10) {
+                            Text(draft.expenses.count > 1 ? "每日单价 \(index + 1)" : "每日单价（元）")
+                                .font(.system(size: 11, weight: .medium)).foregroundStyle(Palette.muted)
+                            AmountField(cents: Binding(get: { draft.expenses[index].unitPrice }, set: { draft.expenses[index].setDailyPrice($0) }))
+                                .frame(width: 110)
+                            Text("\(expense.days(in: draft)) 天 × \(Money.format(expense.unitPrice)) = \(Money.format(expense.total(in: draft)))")
+                                .font(.system(size: 11)).foregroundStyle(Palette.accent).lineLimit(1).minimumScaleFactor(0.8)
+                            Spacer(minLength: 0)
+                        }
+                    }
+                }
+                if draft.expenses.isEmpty {
+                    Button("设置每日单价") { draft.addExpense(draft.kind.categories[0], unitPrice: ExpenseDefaults.saved().price(for: draft.kind.categories[0])) }
+                }
+            }
             if draft.kind != .trip {
-                Label("\(draft.kind.rawValue)按所选日期与单价计算", systemImage: draft.kind.icon)
-                    .font(.system(size: 12)).foregroundStyle(Palette.accent)
+                HStack(spacing: 12) {
+                    Text("用途").font(.system(size: 11, weight: .medium)).foregroundStyle(Palette.muted)
+                    if draft.kind == .meal {
+                        TextField("用途", text: .constant("餐补报销")).disabled(true)
+                            .textFieldStyle(.plain).font(.system(size: 12)).foregroundStyle(Palette.muted)
+                            .padding(.horizontal, 8).frame(height: 28)
+                            .background(Palette.ink.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
+                            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Palette.ink.opacity(0.08)))
+                    } else {
+                        TextField("填写用途，应用至清单每一行", text: Binding(get: { draft.reimbursementPurpose ?? "" }, set: { draft.reimbursementPurpose = $0 }))
+                    }
+                }
             }
             LabeledField(title: "备注 / 报销事由") {
                 TextEditor(text: $draft.note).font(.system(size: 12)).scrollContentBackground(.hidden)
-                    .padding(7).frame(minHeight: 72, idealHeight: 72, maxHeight: .infinity)
+                    .padding(7).frame(minHeight: draft.kind == .meal ? 64 : 72, idealHeight: draft.kind == .meal ? 64 : 72, maxHeight: .infinity)
                     .background(.white, in: RoundedRectangle(cornerRadius: 7))
                     .overlay(RoundedRectangle(cornerRadius: 7).stroke(Palette.ink.opacity(0.10)))
                     .accessibilityLabel("备注 / 报销事由")
             }
-            VStack(alignment: .leading, spacing: 7) {
-                Label("共 \(draft.dates.count) 个报销日", systemImage: "calendar").font(.system(size: 11)).foregroundStyle(Palette.accent)
-                Text(draft.dateSummary).font(.system(size: 10)).foregroundStyle(Palette.muted)
+            if draft.kind != .allowance {
+                VStack(alignment: .leading, spacing: 7) {
+                    Label("共 \(draft.dates.count) 个报销日", systemImage: "calendar").font(.system(size: 11)).foregroundStyle(Palette.accent)
+                    Text(draft.dateSummary).font(.system(size: 10)).foregroundStyle(Palette.muted)
+                }
             }
         }
     }
@@ -364,9 +413,48 @@ struct ClaimEditor: View {
         }
     }
 
+    private var ledgerAttachments: some View {
+        Card {
+            HStack {
+                SectionLabel(title: "发票附件", subtitle: "\(draft.invoiceCount) 份 PDF · \(draft.expenses.flatMap(\.invoices).reduce(0) { $0 + $1.pageCount }) 页 · 合计 \(Money.format(draft.invoiceTotal))")
+                Spacer()
+                Button(action: importLedgerInvoices) { Label("上传 PDF 发票", systemImage: "arrow.up.doc") }
+                    .buttonStyle(ExportButtonStyle(color: Palette.accent))
+            }
+            if draft.invoiceCount == 0 {
+                Button(action: importLedgerInvoices) {
+                    HStack(spacing: 12) {
+                        Image(systemName: "doc.badge.plus").font(.system(size: 24, weight: .light))
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text("添加发票附件").font(.system(size: 12, weight: .medium))
+                            Text("支持多选 PDF · 自动识别号码与金额并生成清单").font(.system(size: 10)).foregroundStyle(Palette.muted)
+                        }
+                        Spacer()
+                    }.foregroundStyle(Palette.accent).padding(20).frame(maxWidth: .infinity)
+                        .background(Palette.canvas, in: RoundedRectangle(cornerRadius: 8))
+                        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Palette.accent.opacity(0.25), style: StrokeStyle(lineWidth: 1, dash: [5, 4])))
+                }.buttonStyle(.plain)
+            }
+            ForEach(draft.expenses) { expense in
+                if let index = draft.expenses.firstIndex(where: { $0.id == expense.id }) {
+                    ForEach($draft.expenses[index].invoices) { $invoice in
+                        InvoiceRow(invoice: $invoice, open: { open(invoice) },
+                                   remove: { removeAttachment(invoice, expenseID: expense.id) },
+                                   rename: { rename(invoice, to: $0, expenseID: expense.id) }, amountChanged: {})
+                    }
+                }
+            }
+        }
+    }
+
     private func addExpense(_ kind: ExpenseKind) {
         draft.addExpense(kind, unitPrice: ExpenseDefaults.saved().price(for: kind))
         selectedKind = kind
+    }
+    private func importLedgerInvoices() {
+        if draft.expenses.isEmpty { draft.addExpense(draft.kind.categories[0], unitPrice: 0) }
+        guard let expenseID = draft.expenses.first?.id else { return }
+        upload(expenseID: expenseID)
     }
     private func upload(expenseID: UUID?, role: ExpenseAttachmentRole = .invoice) {
         if let updated = store.chooseFiles(for: draft, expenseID: expenseID, role: role) { draft = updated }

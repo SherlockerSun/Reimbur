@@ -379,9 +379,8 @@ final class ReimburChecks {
         let word = temporary.appendingPathComponent("word")
         try run("/usr/bin/ditto", ["-x", "-k", printFile.path, word.path])
         let printText = try String(contentsOf: word.appendingPathComponent("word/document.xml"), encoding: .utf8)
-        expectTrue(printText.contains("报销单金额"))
-        expectTrue(printText.contains("电脑机箱"))
-        expectTrue(printText.contains("电脑报销"))
+        expectFalse(printText.contains("<w:t"))
+        expectEqual(printText.components(separatedBy: "<pic:pic>").count - 1, 6)
         expectFalse(printText.contains("个人汇总"))
         try LedgerExporter.export(claim: Claim.make(.meal), to: qa.appendingPathComponent("空餐补清单.xlsx"))
         try captureView(ClaimEditor(claim: claim).environmentObject(store).background(Palette.canvas).textFieldStyle(.roundedBorder).tint(Palette.accent),
@@ -1129,57 +1128,90 @@ final class ReimburChecks {
         expectFalse(FileManager.default.fileExists(atPath: copied.path))
     }
 
-    @MainActor func testWordContainsSummaryCoverAndPackedPDFPages() throws {
-        let store = ClaimStore(root: temporary.appendingPathComponent("db"))
+    func testAttachmentOnlyPrintLayout() throws {
         var claim = sampleClaim()
-        expectTrue(store.save(claim))
-        let pdf = temporary.appendingPathComponent("火车发票.pdf")
-        try makePDF(at: pdf, pages: 2)
-        let trainIndex = claim.expenses.firstIndex { $0.kind == .train }!
-        claim = try store.importFiles([pdf], into: claim, expenseID: claim.expenses[trainIndex].id)
-        claim.expenses[trainIndex].invoices[0].amount = 55300
+        let train = temporary.appendingPathComponent("火车票.pdf")
+        try makePDF(at: train, pages: 2)
         let cover = temporary.appendingPathComponent("报销单.png")
         try makeCover(at: cover)
-        claim = try store.importFiles([cover], into: claim, expenseID: nil)
-        let output = temporary.appendingPathComponent("汇总.docx")
-        try WordExporter.export(claims: [claim], attachmentRoot: store.root.appendingPathComponent("Attachments"), to: output)
-        let document = try unzip(output, entry: "word/document.xml")
-        expectNoThrow(try XMLDocument(xmlString: document))
-        expectTrue(document.contains("报销单"))
-        expectTrue(document.contains("第 1/2 页"))
-        expectTrue(document.contains("第 2/2 页"))
-        expectEqual(document.components(separatedBy: "<pic:pic>").count - 1, 3)
-        expectLessThan(document.range(of: "报销总额")!.lowerBound, document.range(of: "报销单")!.lowerBound)
-        expectLessThan(document.range(of: "报销单")!.lowerBound, document.range(of: "第 1/2 页")!.lowerBound)
-        expectEqual(document.components(separatedBy: "w:type=\"page\"").count - 1, 2)
-        let single = temporary.appendingPathComponent("单张打印.docx")
-        try WordExporter.export(claims: [claim], attachmentRoot: store.root.appendingPathComponent("Attachments"), to: single, packLandscapeInvoices: false)
-        let singleDocument = try unzip(single, entry: "word/document.xml")
-        expectEqual(singleDocument.components(separatedBy: "w:type=\"page\"").count - 1, 3)
-        expectEqual(singleDocument.components(separatedBy: "<pic:pic>").count - 1, 3)
+        let invoice = temporary.appendingPathComponent("打车发票.pdf")
+        try makePDF(at: invoice, pages: 1)
+        let itinerary = temporary.appendingPathComponent("行程单.pdf")
+        var bounds = CGRect(x: 0, y: 0, width: 595, height: 842)
+        let context = CGContext(itinerary as CFURL, mediaBox: &bounds, nil)!
+        for page in 0..<2 {
+            context.beginPDFPage(nil)
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: false)
+            NSColor.white.setFill(); bounds.fill()
+            let style: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 20), .foregroundColor: NSColor.black]
+            "行程单 第 \(page + 1) 页".draw(at: NSPoint(x: 50, y: 770), withAttributes: style)
+            "上海虹桥 → 公司  合计 ¥38.00".draw(at: NSPoint(x: 50, y: 640), withAttributes: style)
+            if page == 1 {
+                // A low footer must prevent trimming it away, even with a large gap above it.
+                "底部说明 必须保留".draw(at: NSPoint(x: 50, y: 45), withAttributes: style)
+            }
+            NSGraphicsContext.restoreGraphicsState()
+            context.endPDFPage()
+        }
+        context.closePDF()
+        let itineraryPDF = PDFDocument(url: itinerary)!
+        let scanned = itineraryPDF.page(at: 0)!.thumbnail(of: NSSize(width: 1190, height: 1684), for: .mediaBox)
+        let screenshot = temporary.appendingPathComponent("行程截图.png")
+        try NSBitmapImageRep(data: scanned.tiffRepresentation!)!.representation(using: .png, properties: [:])!.write(to: screenshot)
+        claim.covers = [Attachment(name: "报销单.png", storedName: "报销单.png")]
+        var taxi = Expense(kind: .taxi, unitPrice: 3800)
+        taxi.invoices = [Attachment(name: "打车发票.pdf", storedName: "打车发票.pdf")]
+        taxi.itineraries = [Attachment(name: "行程单.pdf", storedName: "行程单.pdf"), Attachment(name: "行程截图.png", storedName: "行程截图.png")]
+        var rail = Expense(kind: .train, unitPrice: 55300)
+        rail.invoices = [Attachment(name: "火车票.pdf", storedName: "火车票.pdf")]
+        claim.expenses = [rail, taxi]
+        let output = temporary.appendingPathComponent("附件打印.docx")
+        try WordExporter.export(claims: [claim], attachmentRoot: temporary, to: output)
+        let xml = try unzip(output, entry: "word/document.xml")
+        let document = try XMLDocument(xmlString: xml)
+        expectEqual(try document.nodes(forXPath: "//*[local-name()='t']").count, 0)
+        expectEqual(try document.nodes(forXPath: "//*[local-name()='tbl']").count, 0)
+        let anchors = try document.nodes(forXPath: "//*[local-name()='anchor']")
+        expectEqual(anchors.count, 9) // cover + four rail placements + invoice + two PDF pages + image
+        let refs = try document.nodes(forXPath: "//*[local-name()='blip']/@*[local-name()='embed']").map { $0.stringValue! }
+        expectEqual(refs, ["rIdImage1", "rIdImage2", "rIdImage2", "rIdImage3", "rIdImage3", "rIdImage4", "rIdImage5", "rIdImage6", "rIdImage7"])
+        expectEqual(try document.nodes(forXPath: "//*[local-name()='pageBreakBefore']").count, 4)
+        for (index, anchor) in anchors.enumerated() {
+            let extent = try anchor.nodes(forXPath: "./*[local-name()='extent']").first as! XMLElement
+            let height = Int(extent.attribute(forName: "cy")!.stringValue!)!
+            let y = Int(try anchor.nodes(forXPath: "./*[local-name()='positionV']/*[local-name()='posOffset']").first!.stringValue!)!
+            let expectedCenter = 284 * 635 + (index % 2) * 8135 * 635 + 8135 * 635 / 2
+            expectTrue(abs(y + height / 2 - expectedCenter) <= 1)
+            expectTrue(height <= (8135 - 160) * 635)
+        }
+        let unpacked = temporary.appendingPathComponent("unpacked")
+        try run("/usr/bin/ditto", ["-x", "-k", output.path, unpacked.path])
+        func bitmap(_ number: Int) -> NSBitmapImageRep { NSBitmapImageRep(data: try! Data(contentsOf: unpacked.appendingPathComponent("word/media/image\(number).jpg")))! }
+        expectTrue(bitmap(1).pixelsHigh > bitmap(1).pixelsWide) // portrait cover remains intact
+        expectTrue(abs(Double(bitmap(2).pixelsHigh) / Double(bitmap(2).pixelsWide) - 595.0 / 842) < 0.01)
+        expectTrue(bitmap(5).pixelsHigh < 800) // PDF blank bottom removed
+        expectTrue(bitmap(6).pixelsHigh > 2300) // low footer retained
+        expectTrue(bitmap(7).pixelsHigh < 600) // raster itinerary also cropped
         for entry in ["[Content_Types].xml", "_rels/.rels", "word/styles.xml", "word/_rels/document.xml.rels"] {
             expectNoThrow(try XMLDocument(xmlString: unzip(output, entry: entry)))
         }
+        // No attachments must not produce a blank or explanatory document.
+        expectThrowsError(try WordExporter.export(claims: [Claim.make(.meal)], attachmentRoot: temporary, to: temporary.appendingPathComponent("empty.docx")))
+        // Batch export keeps both records' attachments, with no title or separator pages.
+        let batch = temporary.appendingPathComponent("批量.docx")
+        try WordExporter.export(claims: [claim, claim], attachmentRoot: temporary, to: batch)
+        let batchDocument = try XMLDocument(xmlString: unzip(batch, entry: "word/document.xml"))
+        expectEqual(try batchDocument.nodes(forXPath: "//*[local-name()='anchor']").count, 18)
+        expectEqual(try batchDocument.nodes(forXPath: "//*[local-name()='pageBreakBefore']").count, 8)
+        expectEqual(try batchDocument.nodes(forXPath: "//*[local-name()='t']").count, 0)
         if let directory = ProcessInfo.processInfo.environment["REIMBUR_QA_DIR"] {
             let qa = URL(fileURLWithPath: directory)
             try FileManager.default.createDirectory(at: qa, withIntermediateDirectories: true)
-            try FileManager.default.copyItem(at: output, to: qa.appendingPathComponent("export-test.docx"))
-            try captureUI(store: store, to: qa.appendingPathComponent("app-preview.png"))
-            try captureView(SettingsView().environmentObject(store).background(Palette.canvas).preferredColorScheme(.light).tint(Palette.accent), width: 1230, height: 1060, to: qa.appendingPathComponent("settings.png"))
-            try captureView(ClaimTextPreview(claim: claim, close: {}), width: 900, height: 740, to: qa.appendingPathComponent("text-preview.png"))
-            try captureView(WorkspaceView().environmentObject(store).overlay {
-                DismissibleOverlay(close: {}) { AttachmentPreview(request: PreviewRequest(attachment: claim.covers[0], url: store.url(for: claim.covers[0])), close: {}) }
-            }.preferredColorScheme(.light), width: 1440, height: 1060, to: qa.appendingPathComponent("masked-preview.png"))
-            var grouped = claim
-            grouped.expenses.removeAll { $0.kind == .subsidy || $0.kind == .hotel }
-            grouped.expenses += [Expense(kind: .train, unitPrice: 40300, origin: "杭州东", destination: "上海虹桥"),
-                                 Expense(kind: .taxi, unitPrice: 3800), Expense(kind: .taxi, unitPrice: 5600)]
-            try captureView(ClaimEditor(claim: grouped).environmentObject(store).frame(width: 960, height: 1200).background(Palette.canvas).preferredColorScheme(.light).tint(Palette.accent), width: 960, height: 1200, to: qa.appendingPathComponent("grouped-expenses.png"))
-            var sixRows = claim
-            sixRows.dates = ["2026-11-01", "2026-11-30"]
-            try captureView(ClaimEditor(claim: sixRows).environmentObject(store).background(Palette.canvas).preferredColorScheme(.light).tint(Palette.accent), width: 689, height: 1000, to: qa.appendingPathComponent("six-row-calendar-min-width.png"))
-            let multi = multiPersonClaim()
-            try captureView(ClaimEditor(claim: multi).environmentObject(store).background(Palette.canvas).preferredColorScheme(.light).tint(Palette.accent), width: 960, height: 1540, to: qa.appendingPathComponent("people-editor.png"))
+            try Data(contentsOf: output).write(to: qa.appendingPathComponent("attachment-print.docx"))
+            // A single attachment verifies the odd final page has no spurious extra page.
+            var single = claim; single.expenses = []
+            try WordExporter.export(claims: [single], attachmentRoot: temporary, to: qa.appendingPathComponent("single-print.docx"))
         }
     }
 
@@ -1816,7 +1848,8 @@ final class ReimburChecks {
         try run("/usr/bin/ditto", ["-x", "-k", document.path, word.path])
         let xml = try String(contentsOf: word.appendingPathComponent("word/document.xml"), encoding: .utf8)
         for attachment in claim.expenses[0].itineraries ?? [] { expectTrue(xml.contains("行程单 · " + attachment.name)) }
-        expectTrue(xml.contains("发票：2 份"))
+        expectFalse(xml.contains("<w:t"))
+        expectEqual(xml.components(separatedBy: "<pic:pic>").count - 1, 5)
         if let path = ProcessInfo.processInfo.environment["REIMBUR_QA_DIR"] {
             let qa = URL(fileURLWithPath: path)
             try FileManager.default.createDirectory(at: qa, withIntermediateDirectories: true)
@@ -2315,7 +2348,7 @@ private func expectNoThrow<T>(_ action: @autoclosure () throws -> T, file: Stati
             ("Subsidy skips new invoices and preserves legacy files", checks.testSubsidyRejectsNewInvoicesAndPreservesLegacyAttachments),
             ("Native PDF and image preview", checks.testNativePreviewLoadsPagesAndImages),
             ("Attachment copy batch rollback restart cleanup", checks.testImportCopiesFilesAndRollsBackInvalidBatch),
-            ("Word summary cover order and two invoices per page", checks.testWordContainsSummaryCoverAndPackedPDFPages),
+            ("Attachment-only print layout cropping and rail duplicates", checks.testAttachmentOnlyPrintLayout),
             ("Export failure preserves existing file", checks.testExportFailurePreservesExistingFile)
         ]
         let selectedTests = tests.filter { test in

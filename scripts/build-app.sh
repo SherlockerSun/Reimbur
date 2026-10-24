@@ -1,8 +1,12 @@
 #!/bin/zsh
 set -euo pipefail
 cd "${0:A:h}/.."
-swift build -c release
-binary_dir=$(swift build -c release --show-bin-path)
+build_args=(-c release)
+if [[ -n "${REIMBUR_BUILD_ARCH:-}" ]]; then
+    build_args+=(--arch "$REIMBUR_BUILD_ARCH")
+fi
+swift build "${build_args[@]}"
+binary_dir=$(swift build "${build_args[@]}" --show-bin-path)
 app_dir="$PWD/dist/Reimbur.app"
 mkdir -p "$app_dir/Contents/MacOS" "$app_dir/Contents/Resources"
 cp "$binary_dir/Reimbur" "$app_dir/Contents/MacOS/Reimbur"

@@ -268,11 +268,10 @@ import UniformTypeIdentifiers
         guard panel.runModal() == .OK, let destination = panel.url else { return }
         exporting = true
         let attachmentRoot = root.appendingPathComponent("Attachments")
-        let packInvoices = UserDefaults.standard.object(forKey: "packLandscapeInvoices") as? Bool ?? true
         Task {
             do {
                 try await Task.detached(priority: .userInitiated) {
-                    try WordExporter.export(claims: records, attachmentRoot: attachmentRoot, to: destination, packLandscapeInvoices: packInvoices)
+                    try WordExporter.export(claims: records, attachmentRoot: attachmentRoot, to: destination)
                 }.value
                 exporting = false
                 exportSuccess = destination

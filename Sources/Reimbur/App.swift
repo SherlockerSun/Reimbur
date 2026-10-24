@@ -84,7 +84,7 @@ struct WorkspaceView: View {
         .alert(store.exportSuccess?.pathExtension == "zip" ? "发票已导出" : store.exportSuccess?.pathExtension == "xlsx" ? "报销清单已导出" : "打印文档已导出", isPresented: Binding(get: { store.exportSuccess != nil }, set: { if !$0 { store.exportSuccess = nil } })) {
             Button("在 Finder 中显示") { if let url = store.exportSuccess { NSWorkspace.shared.activateFileViewerSelecting([url]) }; store.exportSuccess = nil }
             Button("完成", role: .cancel) { store.exportSuccess = nil }
-        } message: { Text(store.exportSuccess?.pathExtension == "zip" ? "当前记录的全部发票和行程单已打包，保留原始文件。" : store.exportSuccess?.pathExtension == "xlsx" ? "清单已保存为 Excel 文件，包含日期、姓名、发票号码、金额、报销单金额、明细及用途。" : "已按说明信息、报销单、发票与行程单顺序排版。打印布局使用设置中的导出选项。") }
+        } message: { Text(store.exportSuccess?.pathExtension == "zip" ? "当前记录的全部发票和行程单已打包，保留原始文件。" : store.exportSuccess?.pathExtension == "xlsx" ? "清单已保存为 Excel 文件，包含日期、姓名、发票号码、金额、报销单金额、明细及用途。" : "仅包含附件，每页上下各一张；行程单已裁切底部空白，火车票每张打印两份。") }
         .alert("重命名报销记录", isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
             TextField("报销名称", text: $newTitle)
             Button("保存") { if let id = renaming { store.rename(id, to: newTitle) }; renaming = nil }

@@ -19,7 +19,6 @@ struct SettingsView: View {
     @AppStorage("startupPage") private var startupPage = "home"
     @AppStorage("defaultSubsidy") private var subsidy = 0
     @AppStorage("defaultMeal") private var meal = 0
-    @AppStorage("packLandscapeInvoices") private var packInvoices = true
     @AppStorage("sidebarCaption") private var sidebarCaption = AppPreferences.defaultCaption
     @AppStorage("defaultTravelerNames") private var travelerNames = "[]"
     @AppStorage("invoiceNameFormat") private var invoiceFormat = AttachmentNaming.defaultFormat
@@ -72,9 +71,8 @@ struct SettingsView: View {
                         .font(.system(size: 11)).foregroundStyle(Palette.muted)
                 }
                 Card {
-                    SectionLabel(title: "打印文档导出", subtitle: "按说明信息 → 报销单 → 发票与行程单排列，保留 PDF 的全部页面")
-                    Toggle("横向发票两张同页", isOn: $packInvoices).toggleStyle(.switch).controlSize(.small)
-                    Text(packInvoices ? "较高或竖向的票据仍使用整页，保持打印可读性。" : "每张发票页面单独使用一页 A4 纸。")
+                    SectionLabel(title: "打印文档导出", subtitle: "仅导出报销单、发票与行程单，不添加文字说明")
+                    Text("每页上下各一张，火车票连续打印两份；行程单自动裁切底部空白，PDF 的全部页面均保留。")
                         .font(.system(size: 11)).foregroundStyle(Palette.muted)
                     HStack {
                         Text("共 \(store.claims.count) 条记录 · \(store.claims.reduce(0) { $0 + $1.invoiceCount }) 份发票")

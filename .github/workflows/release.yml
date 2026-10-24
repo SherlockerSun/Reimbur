@@ -1,0 +1,66 @@
+name: Publish macOS release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - Resources/Info.plist
+      - .github/workflows/release.yml
+      - .github/release-notes/**
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-macos-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: contains(github.event.head_commit.message, '[release]')
+    runs-on: macos-15-intel
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REIMBUR_BUILD_ARCH: arm64
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read release version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Resources/Info.plist)
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          tag="v$version"
+          test -f ".github/release-notes/$tag.md"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - name: Build Apple Silicon app
+        run: ./scripts/build-app.sh
+      - name: Package and verify
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          codesign --verify --deep --strict dist/Reimbur.app
+          test "$(lipo -archs dist/Reimbur.app/Contents/MacOS/Reimbur)" = arm64
+          archive="Reimbur-$RELEASE_TAG-macOS-arm64.zip"
+          ditto -c -k --sequesterRsrc --keepParent dist/Reimbur.app "dist/$archive"
+          cd dist
+          shasum -a 256 "$archive" > SHA256SUMS.txt
+      - name: Upload assets and publish release
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Keep the release private as a draft until all assets have uploaded. Publishing
+          # creates the version tag, so its remote presence also confirms completion.
+          gh release create "$RELEASE_TAG" \
+            --target "$GITHUB_SHA" \
+            --title "Reimbur $RELEASE_TAG" \
+            --notes-file ".github/release-notes/$RELEASE_TAG.md" \
+            --draft \
+            "dist/Reimbur-$RELEASE_TAG-macOS-arm64.zip" \
+            dist/SHA256SUMS.txt
+          gh release edit "$RELEASE_TAG" --draft=false --latest

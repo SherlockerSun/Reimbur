@@ -43,7 +43,7 @@ enum ClaimSummary {
     private static func renderSection(_ claim: Claim, person: PersonBreakdown? = nil) -> String {
         var lines = [claim.title, "类型：\(claim.kind.rawValue)报销"]
         if let person {
-            if claim.kind == .trip { lines.append("出差人：\(person.name)（\(person.claimant == nil ? claim.travelerCount : 1) 人）") }
+            if claim.kind == .trip { lines.append("出差人：\(person.name)") }
         } else if claim.kind == .trip {
             let people = claim.travelerNames.map { $0.isEmpty ? "未填写" : $0.joined(separator: "、") } ?? "历史记录，尚未填写姓名"
             lines.append("出差人：\(people)（\(claim.travelerCount) 人）")

@@ -31,6 +31,7 @@ struct WorkspaceView: View {
     @EnvironmentObject private var store: ClaimStore
     @AppStorage("recordsCollapsed") private var recordsCollapsed = false
     @AppStorage("startupPage") private var startupPage = "home"
+    @AppStorage("sidebarCaption") private var sidebarCaption = AppPreferences.defaultCaption
     @State private var didAppear = false
     @State private var home = true
     @State private var filter: ClaimKind?
@@ -78,10 +79,10 @@ struct WorkspaceView: View {
         .alert("操作未完成", isPresented: Binding(get: { store.errorMessage != nil }, set: { if !$0 { store.errorMessage = nil } })) {
             Button("知道了") { store.errorMessage = nil }
         } message: { Text(store.errorMessage ?? "") }
-        .alert("Word 已导出", isPresented: Binding(get: { store.exportSuccess != nil }, set: { if !$0 { store.exportSuccess = nil } })) {
+        .alert(store.exportSuccess?.pathExtension == "zip" ? "发票已导出" : "Word 已导出", isPresented: Binding(get: { store.exportSuccess != nil }, set: { if !$0 { store.exportSuccess = nil } })) {
             Button("在 Finder 中显示") { if let url = store.exportSuccess { NSWorkspace.shared.activateFileViewerSelecting([url]) }; store.exportSuccess = nil }
             Button("完成", role: .cancel) { store.exportSuccess = nil }
-        } message: { Text("已按说明信息、报销单、发票顺序排版。打印布局使用设置中的导出选项。") }
+        } message: { Text(store.exportSuccess?.pathExtension == "zip" ? "当前记录的全部发票和行程单已打包，保留原始文件。" : "已按说明信息、报销单、发票与行程单顺序排版。打印布局使用设置中的导出选项。") }
         .alert("重命名报销记录", isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
             TextField("报销名称", text: $newTitle)
             Button("保存") { if let id = renaming { store.rename(id, to: newTitle) }; renaming = nil }
@@ -108,7 +109,7 @@ struct WorkspaceView: View {
             if store.exporting {
                 ZStack {
                     Color.black.opacity(0.25)
-                    VStack(spacing: 18) { ProgressView(); Text("正在整理发票并生成 Word…") }
+                    VStack(spacing: 18) { ProgressView(); Text("正在整理附件并导出…") }
                         .padding(35).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18))
                 }
             }
@@ -146,8 +147,9 @@ struct WorkspaceView: View {
                             count: store.claims.filter { $0.kind == kind }.count) { navigate(kind) }
             }
             Spacer()
-            Text("轻记每一笔，安心每一天").font(.system(size: 11)).foregroundStyle(.white.opacity(0.45)).padding(.bottom, 15)
-            SidebarItem(title: "设置", icon: "gearshape", selected: store.showSettings) {
+            Text(AppPreferences.caption(sidebarCaption)).font(.system(size: 11)).foregroundStyle(.white.opacity(0.45))
+                .frame(maxWidth: .infinity, alignment: .center).multilineTextAlignment(.center).lineLimit(1).padding(.bottom, 3)
+            SidebarItem(title: "设置", icon: "gearshape", selected: store.showSettings, centered: true) {
                 store.showSettings = true; batch = false; checked = []
             }
         }.padding(20).padding(.top, 40).frame(width: 210)
@@ -254,6 +256,8 @@ struct WorkspaceView: View {
             .contextMenu {
                 Button("预览清单", systemImage: "eye") { summary = claim }
                 Button("复制清单", systemImage: "doc.on.doc") { copySummary(claim) }
+                Button("导出发票", systemImage: "archivebox") { store.exportInvoices(claim) }
+                    .disabled(store.exporting || claim.expenses.flatMap(\.attachments).isEmpty)
                 Divider()
                 Button("重命名", systemImage: "pencil") { newTitle = claim.title; renaming = claim.id }
                 Button("删除记录", systemImage: "trash", role: .destructive) { deleting = [claim.id] }
@@ -273,15 +277,17 @@ private struct SidebarItem: View {
     var icon: String
     var selected: Bool
     var count: Int? = nil
+    var centered = false
     var action: () -> Void
     @State private var hovering = false
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 10) {
+            HStack(spacing: centered ? 5 : 10) {
+                if centered { Spacer(minLength: 0) }
                 Image(systemName: icon).frame(width: 20)
                 Text(title).font(.system(size: 12, weight: selected ? .semibold : .regular))
                 Spacer()
-                if let count { Text("\(count)").font(.system(size: 10)).foregroundStyle(.white.opacity(0.5)) }
+                if !centered, let count { Text("\(count)").font(.system(size: 10)).foregroundStyle(.white.opacity(0.5)) }
             }.padding(12).frame(maxWidth: .infinity)
                 .background(.white.opacity(selected ? 0.16 : (hovering ? 0.09 : 0)), in: RoundedRectangle(cornerRadius: 8)).contentShape(Rectangle())
         }.buttonStyle(.plain).onHover { hovering = $0 }.help(title).accessibilityLabel(title)

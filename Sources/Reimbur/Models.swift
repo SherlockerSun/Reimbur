@@ -77,6 +77,7 @@ struct Attachment: Codable, Identifiable, Equatable {
     var storedName: String
     var amount: Int64 = 0
     var pageCount: Int = 1
+    var number: String?
 }
 
 struct Expense: Codable, Identifiable, Equatable {
@@ -90,9 +91,37 @@ struct Expense: Codable, Identifiable, Equatable {
     // nil uses the claim calendar; a non-nil set selects this expense's own dates.
     var dates: Set<String>?
     var invoices: [Attachment] = []
+    // Optional for compatibility with records saved before itinerary support.
+    var itineraries: [Attachment]?
+    var attachments: [Attachment] { invoices + (itineraries ?? []) }
     var claimant: String?
     // Rows split from the same group retain their relationship when names are added/removed.
     var subsidyGroupID: UUID?
+    // Optional fields keep records from earlier versions readable.
+    var totalAmount: Int64?
+    var invoiceTotalLinked: Bool?
+    var synchronizesInvoiceTotal: Bool { kind.isTransport || kind == .hotel }
+
+    mutating func setTotalAmount(_ amount: Int64) {
+        totalAmount = amount
+        invoiceTotalLinked = false
+        if kind.isTransport { unitPrice = amount }
+    }
+    mutating func synchronizeInvoiceTotal() {
+        guard synchronizesInvoiceTotal else {
+            totalAmount = nil
+            invoiceTotalLinked = nil
+            return
+        }
+        totalAmount = invoiceTotal
+        invoiceTotalLinked = true
+        if kind.isTransport { unitPrice = invoiceTotal }
+    }
+    mutating func setDailyPrice(_ amount: Int64) {
+        unitPrice = amount
+        totalAmount = nil
+        invoiceTotalLinked = false
+    }
 
     func days(in claim: Claim) -> Int {
         if kind == .hotel, dates == nil { return max(0, claim.dates.count - 1) }
@@ -100,6 +129,7 @@ struct Expense: Codable, Identifiable, Equatable {
     }
     func defaultStayDates(in claim: Claim) -> Set<String> { Set(claim.dates.sorted().dropLast()) }
     func total(in claim: Claim) -> Int64 {
+        if synchronizesInvoiceTotal, let totalAmount { return totalAmount }
         if kind.isTransport { return unitPrice }
         let units = kind == .subsidy ? (claimant == nil ? claim.travelerCount : 1) : (kind == .hotel ? quantity : 1)
         return unitPrice * Int64(units) * Int64(days(in: claim))
@@ -107,7 +137,7 @@ struct Expense: Codable, Identifiable, Equatable {
     func formula(in claim: Claim) -> String {
         switch kind {
         case .subsidy: return "\(claimant == nil ? claim.travelerCount : 1) 人 × \(Money.format(unitPrice)) × \(days(in: claim)) 天"
-        case .hotel: return "\(quantity) 间 × \(Money.format(unitPrice)) × \(days(in: claim)) 晚"
+        case .hotel: return "住宿总价（\(days(in: claim)) 晚）"
         case .meal, .allowance: return "\(days(in: claim)) 天 × \(Money.format(unitPrice))"
         default: return "按实际交通费用"
         }
@@ -122,6 +152,14 @@ struct Claim: Codable, Identifiable, Equatable {
     var travelers = 1
     var travelerNames: [String]?
     var travelerCount: Int { travelerNames?.count ?? travelers }
+    @discardableResult mutating func renameTraveler(from old: String, to new: String) -> Bool {
+        let name = new.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let index = travelerNames?.firstIndex(of: old), !name.isEmpty,
+              name == old || !(travelerNames ?? []).contains(name) else { return false }
+        travelerNames?[index] = name
+        for index in expenses.indices where expenses[index].claimant == old { expenses[index].claimant = name }
+        return true
+    }
     mutating func setTravelerNames(_ names: [String]) {
         let previous = travelerNames ?? []
         var seen = Set<String>()
@@ -183,9 +221,25 @@ struct Claim: Codable, Identifiable, Equatable {
             return [expense]
         }
     }
-    var withPeopleAssigned: Claim { var claim = self; claim.assignPeopleIfNeeded(); return claim }
+    var withPeopleAssigned: Claim {
+        var claim = self
+        // Restore daily calculations for records previously linked to invoice totals.
+        for index in claim.expenses.indices where !claim.expenses[index].synchronizesInvoiceTotal {
+            claim.expenses[index].totalAmount = nil
+            claim.expenses[index].invoiceTotalLinked = nil
+        }
+        claim.assignPeopleIfNeeded()
+        return claim
+    }
+    var withDirectHotelTotals: Claim {
+        var claim = self
+        for index in claim.expenses.indices where claim.expenses[index].kind == .hotel && claim.expenses[index].totalAmount == nil {
+            claim.expenses[index].totalAmount = claim.expenses[index].total(in: self)
+        }
+        return claim
+    }
     mutating func addExpense(_ kind: ExpenseKind, unitPrice: Int64) {
-        expenses.append(Expense(kind: kind, unitPrice: unitPrice, claimant: kind == .subsidy ? nil : travelerNames?.first))
+        expenses.append(Expense(kind: kind, unitPrice: unitPrice, claimant: kind == .subsidy ? nil : travelerNames?.first, totalAmount: kind == .hotel ? unitPrice : nil))
         assignPeopleIfNeeded()
         if expenseOrder != nil && !expenseOrder!.contains(kind) { expenseOrder!.append(kind) }
     }
@@ -207,7 +261,7 @@ struct Claim: Codable, Identifiable, Equatable {
     var invoiceTotal: Int64 { expenses.reduce(0) { $0 + $1.invoiceTotal } }
     var invoiceCount: Int { expenses.reduce(0) { $0 + $1.invoices.count } }
     var difference: Int64 { total - invoiceTotal }
-    var attachments: [Attachment] { covers + expenses.flatMap(\.invoices) }
+    var attachments: [Attachment] { covers + expenses.flatMap(\.attachments) }
     var expenseGroups: [ExpenseGroup] {
         var seen = Set<ExpenseKind>()
         return ((expenseOrder ?? []) + ExpenseKind.allCases).filter { seen.insert($0).inserted }.compactMap { kind in

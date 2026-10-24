@@ -8,6 +8,20 @@ enum Palette {
     static let muted = Color(red: 0.45, green: 0.50, blue: 0.53)
 }
 
+struct ExportButtonStyle: ButtonStyle {
+    var color: Color
+    @Environment(\.isEnabled) private var enabled
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label.font(.system(size: 12, weight: .medium))
+            .padding(.horizontal, 13).padding(.vertical, 5)
+            .foregroundStyle(color)
+            .background(color.opacity(configuration.isPressed ? 0.20 : 0.10), in: RoundedRectangle(cornerRadius: 7))
+            .overlay(RoundedRectangle(cornerRadius: 7).stroke(color.opacity(0.25)))
+            .opacity(enabled ? 1 : 0.4)
+            .contentShape(RoundedRectangle(cornerRadius: 7))
+    }
+}
+
 struct Card<Content: View>: View {
     var height: CGFloat? = nil
     var fillHeight = false
@@ -47,6 +61,21 @@ struct Metric: View {
                 .foregroundStyle(emphasis ? .white : Palette.ink)
         }.padding(17).frame(maxWidth: .infinity, alignment: .leading)
             .background(background ?? (emphasis ? Palette.accent : .white), in: RoundedRectangle(cornerRadius: 12))
+    }
+}
+
+struct ReimbursementMetrics: View {
+    var days: Int
+    var total: Int64
+    var invoiceTotal: Int64
+    var invoiceCount: Int
+    var body: some View {
+        HStack(spacing: 12) {
+            Metric(title: "报销天数", value: "\(days) 天", icon: "calendar", background: Color(red: 0.88, green: 0.94, blue: 1))
+            Metric(title: "报销总额", value: Money.format(total), icon: "yensign.circle", background: Color(red: 0.92, green: 0.89, blue: 1))
+            Metric(title: "发票总额", value: Money.format(invoiceTotal), icon: "doc.text", background: Color(red: 1, green: 0.93, blue: 0.84))
+            Metric(title: "发票数量", value: "\(invoiceCount) 份", icon: "square.stack", background: Color(red: 0.86, green: 0.96, blue: 0.95))
+        }
     }
 }
 
@@ -91,7 +120,6 @@ struct CalendarPicker: View {
     @State private var frames: [String: CGRect] = [:]
     @State private var paint = CalendarPaintSelection()
     @State private var lastPoint: CGPoint?
-    @State private var lastSweep = Date.distantPast
     @State private var coordinateID = UUID()
     private let columns = Array(repeating: GridItem(.flexible(), spacing: 0), count: 7)
     init(selection: Binding<Set<String>>) {
@@ -131,12 +159,8 @@ struct CalendarPicker: View {
                             RoundedRectangle(cornerRadius: 7).stroke(DayKey.calendar.isDateInToday(date) ? Palette.accent : .clear).padding(2)
                         }.frame(maxWidth: .infinity).frame(height: 32)
                             .contentShape(Rectangle())
-                            .onTapGesture {
-                                guard Date().timeIntervalSince(lastSweep) > 0.3 else { return }
-                                if selection.contains(key) { selection.remove(key) } else { selection.insert(key) }
-                            }
                             .background(GeometryReader { geo in Color.clear.preference(key: CalendarFrames.self, value: [key: geo.frame(in: .named(coordinateID))]) })
-                            .help("\(key)，点击选择，长按拖动批量选择")
+                            .help("\(key)，点击选择，按下拖动批量选择")
                             .accessibilityLabel("\(key)\(selected ? " 已选择" : "")").accessibilityAddTraits(.isButton)
                     }
                 }
@@ -144,25 +168,10 @@ struct CalendarPicker: View {
             .contentShape(Rectangle())
             .coordinateSpace(name: coordinateID)
             .onPreferenceChange(CalendarFrames.self) { frames = $0 }
-            .simultaneousGesture(LongPressGesture(minimumDuration: 0.22, maximumDistance: 14)
-                .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .named(coordinateID)))
-                .onChanged { value in
-                    if case .second(true, let drag?) = value {
-                        if lastPoint == nil { visit(drag.startLocation) }
-                        let from = lastPoint ?? drag.startLocation
-                        let distance = hypot(drag.location.x - from.x, drag.location.y - from.y)
-                        let steps = max(1, Int(distance / 3))
-                        for step in 1...steps {
-                            let f = CGFloat(step) / CGFloat(steps)
-                            visit(CGPoint(x: from.x + (drag.location.x - from.x) * f, y: from.y + (drag.location.y - from.y) * f))
-                        }
-                        lastPoint = drag.location
-                        lastSweep = Date()
-                    }
-                }
-                .onEnded { value in
-                    if case .second(true, let drag?) = value, lastPoint != nil { visit(drag.location) }
-                    if lastPoint != nil { lastSweep = Date() }
+            .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .named(coordinateID))
+                .onChanged { drag in sweep(to: drag.location, from: drag.startLocation) }
+                .onEnded { drag in
+                    sweep(to: drag.location, from: drag.startLocation)
                     paint = CalendarPaintSelection(); lastPoint = nil
                 })
             HStack {
@@ -183,6 +192,16 @@ struct CalendarPicker: View {
             }.font(.system(size: 11))
         }.foregroundStyle(Palette.ink)
     }
+    private func sweep(to location: CGPoint, from start: CGPoint) {
+        if lastPoint == nil { visit(start) }
+        let from = lastPoint ?? start
+        let steps = max(1, Int(hypot(location.x - from.x, location.y - from.y) / 3))
+        for step in 1...steps {
+            let fraction = CGFloat(step) / CGFloat(steps)
+            visit(CGPoint(x: from.x + (location.x - from.x) * fraction, y: from.y + (location.y - from.y) * fraction))
+        }
+        lastPoint = location
+    }
     private func move(_ amount: Int) { month = DayKey.calendar.date(byAdding: .month, value: amount, to: month)! }
 }
 
@@ -192,11 +211,30 @@ private struct CalendarFrames: PreferenceKey {
 }
 
 struct CalendarPaintSelection {
-    private var visited = Set<String>()
+    private var path: [String] = []
+    private var original: [String: Bool] = [:]
     private var selecting: Bool?
+    private var restoredStart = false
     mutating func visit(_ key: String, selection: inout Set<String>) {
-        guard visited.insert(key).inserted else { return }
+        if let index = path.firstIndex(of: key) {
+            let returningToStart = index == 0 && path.count > 1
+            for removed in path.dropFirst(index + 1) { restore(removed, selection: &selection) }
+            path.removeSubrange((index + 1)..<path.count)
+            if returningToStart { restore(key, selection: &selection); restoredStart = true }
+            return
+        }
+        if original[key] == nil { original[key] = selection.contains(key) }
         if selecting == nil { selecting = !selection.contains(key) }
+        if restoredStart, let start = path.first {
+            apply(start, selection: &selection); restoredStart = false
+        }
+        path.append(key)
+        apply(key, selection: &selection)
+    }
+    private func restore(_ key: String, selection: inout Set<String>) {
+        if original[key] == true { selection.insert(key) } else { selection.remove(key) }
+    }
+    private func apply(_ key: String, selection: inout Set<String>) {
         if selecting == true { selection.insert(key) } else { selection.remove(key) }
     }
 }
@@ -209,8 +247,13 @@ extension CalendarPicker {
 
 struct PeopleTagInput: View {
     @Binding var names: [String]
+    var rename: ((String, String) -> Bool)? = nil
     @State private var input = ""
     @FocusState private var focused: Bool
+    @State private var editingName: String?
+    @State private var editedName = ""
+    @State private var renameError = false
+    @FocusState private var editingFocused: Bool
     private let inputID = "traveler-name-input"
     var body: some View {
         GeometryReader { geometry in
@@ -219,12 +262,27 @@ struct PeopleTagInput: View {
                     HStack(spacing: 6) {
                         ForEach(names, id: \.self) { name in
                             HStack(spacing: 6) {
-                                Text(name).lineLimit(1)
+                                if editingName == name {
+                                    TextField("修改姓名", text: $editedName).textFieldStyle(.plain)
+                                        .frame(width: max(60, CGFloat(editedName.count) * 14 + 8))
+                                        .focused($editingFocused).onSubmit(commitRename)
+                                        .onChange(of: editingFocused) { _, value in if !value { commitRename() } }
+                                        .onExitCommand { editingName = nil; editingFocused = false }
+                                        .accessibilityLabel("修改报销人姓名")
+                                } else {
+                                    Text(name).lineLimit(1)
+                                }
                                 Button { names.removeAll { $0 == name } } label: {
                                     Image(systemName: "xmark").font(.system(size: 9, weight: .bold))
                                 }.buttonStyle(.plain).help("移除\(name)")
                             }.font(.system(size: 12)).padding(.horizontal, 9).padding(.vertical, 5)
                                 .foregroundStyle(Palette.accent).background(Palette.accent.opacity(0.09), in: Capsule())
+                                .contentShape(Capsule()).simultaneousGesture(TapGesture(count: 2).onEnded {
+                                    guard editingName == nil else { return }
+                                    commit(); focused = false
+                                    editingName = name; editedName = name
+                                    DispatchQueue.main.async { editingFocused = true }
+                                }).help("双击修改姓名")
                         }
                         TextField("输入姓名，回车确认", text: $input).textFieldStyle(.plain)
                             .font(.system(size: 12)).focused($focused).frame(minWidth: 130)
@@ -234,19 +292,31 @@ struct PeopleTagInput: View {
                             }.onChange(of: focused) { _, value in if !value { commit() } }
                             .accessibilityLabel("出差人姓名").id(inputID)
                     }.frame(minWidth: max(0, geometry.size.width - 16), alignment: .leading).padding(.horizontal, 8)
-                        .frame(height: 38).contentShape(Rectangle()).onTapGesture { focused = true }
+                        .frame(height: 38)
+                        .background(Color.clear.contentShape(Rectangle()).onTapGesture { if editingName == nil { focused = true } })
                 }
                 .onChange(of: focused) { _, value in if value { reader.scrollTo(inputID, anchor: .trailing) } }
             }
         }.frame(height: 38)
             .background(.white, in: RoundedRectangle(cornerRadius: 7))
             .overlay(RoundedRectangle(cornerRadius: 7).stroke(focused ? Palette.accent : Palette.ink.opacity(0.18), lineWidth: focused ? 1.5 : 1))
-            .background(OutsideClickObserver(enabled: focused && !input.isEmpty, action: commit))
+            .background(OutsideClickObserver(enabled: (focused && !input.isEmpty) || editingName != nil, action: { commit(); commitRename() }))
+            .alert("姓名不能为空或与其他报销人重复", isPresented: $renameError) { Button("知道了", role: .cancel) {} }
     }
     private func commit() {
         let name = input.trimmingCharacters(in: .whitespacesAndNewlines)
         if !name.isEmpty && !names.contains(name) { names.append(name) }
         input = ""
+    }
+    private func commitRename() {
+        guard let original = editingName else { return }
+        let name = editedName.trimmingCharacters(in: .whitespacesAndNewlines)
+        editingName = nil; editingFocused = false
+        guard name != original else { return }
+        guard !name.isEmpty, !names.contains(name) else { renameError = true; return }
+        if let rename {
+            if !rename(original, name) { renameError = true }
+        } else if let index = names.firstIndex(of: original) { names[index] = name }
     }
 }
 
@@ -268,7 +338,7 @@ struct DismissibleOverlay<Content: View>: View {
 
 // A click on an unfocusable area (such as the calendar) does not blur a macOS text field.
 // Observe local mouse events so a pending name is confirmed on those clicks too.
-private struct OutsideClickObserver: NSViewRepresentable {
+struct OutsideClickObserver: NSViewRepresentable {
     var enabled: Bool
     var action: () -> Void
     func makeCoordinator() -> Coordinator { Coordinator() }

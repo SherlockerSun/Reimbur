@@ -24,13 +24,19 @@ struct PeriodPicker: View {
 struct DashboardView: View {
     var claims: [Claim]
     @Binding var period: ClaimPeriodFilter
+    @State private var hoveredMonth: Date?
+    @State private var hoveredKind: ClaimKind?
+    @State private var hoverLocation = CGPoint.zero
+    @State private var hoverAvoidance = CGRect.zero
+    @State private var coordinateID = UUID()
     private var records: [Claim] { claims.filter(period.matches) }
     private var total: Int64 { records.reduce(0) { $0 + $1.total } }
     private var invoiceTotal: Int64 { records.reduce(0) { $0 + $1.invoiceTotal } }
     private var invoiceCount: Int { records.reduce(0) { $0 + $1.invoiceCount } }
     private struct MonthPoint: Identifiable {
         var date: Date
-        var amount: Double
+        var records: [Claim]
+        var amount: Double { Double(records.reduce(Int64(0)) { $0 + $1.total }) / 100 }
         var id: Date { date }
     }
     private var monthly: [MonthPoint] {
@@ -42,7 +48,7 @@ struct DashboardView: View {
         return (0..<12).reversed().map { back in
             let date = calendar.date(byAdding: .month, value: -back, to: end)!
             let sameMonth = records.filter { calendar.isDate(ClaimPeriodFilter.date(for: $0), equalTo: date, toGranularity: .month) }
-            return MonthPoint(date: date, amount: Double(sameMonth.reduce(Int64(0)) { $0 + $1.total }) / 100)
+            return MonthPoint(date: date, records: sameMonth)
         }
     }
     var body: some View {
@@ -56,30 +62,17 @@ struct DashboardView: View {
                     Spacer()
                     PeriodPicker(claims: claims, period: $period).frame(width: 250)
                 }
-                HStack(spacing: 14) {
-                    Metric(title: "报销总额 · \(records.count) 条记录", value: Money.format(total), icon: "yensign.circle", emphasis: true)
-                    Metric(title: "发票金额", value: Money.format(invoiceTotal), icon: "doc.text")
-                    Metric(title: "发票数量", value: "\(invoiceCount) 份", icon: "square.stack")
-                    Metric(title: "总额 − 发票金额", value: Money.format(total - invoiceTotal), icon: "arrow.left.arrow.right")
-                }
+                ReimbursementMetrics(days: records.reduce(0) { $0 + $1.reimbursementDayCount },
+                                     total: total, invoiceTotal: invoiceTotal, invoiceCount: invoiceCount)
                 HStack(alignment: .top, spacing: 18) {
                     Card {
                         SectionLabel(title: "月度报销金额", subtitle: period.year == 0 ? "以最近一笔记录所在月为末月，展示近 12 个月" : "\(String(period.year)) 年 · 按月汇总")
-                        Chart(monthly) { point in
-                            BarMark(x: .value("月份", point.date, unit: .month), y: .value("金额（元）", point.amount))
-                                .foregroundStyle(Palette.accent.gradient).cornerRadius(4)
-                        }.chartXAxis { AxisMarks(values: .stride(by: .month)) { _ in AxisValueLabel(format: .dateTime.month(.defaultDigits)) } }
-                            .chartYAxisLabel("元").frame(height: 245)
+                        monthlyChart
                     }
                     Card {
                         SectionLabel(title: "报销类型分布", subtitle: "按报销金额统计 · 单位：元")
                         if total > 0 {
-                            Chart(ClaimKind.allCases) { kind in
-                                let value = records.filter { $0.kind == kind }.reduce(Int64(0)) { $0 + $1.total }
-                                SectorMark(angle: .value("金额", Double(value) / 100), innerRadius: .ratio(0.62), angularInset: 3)
-                                    .foregroundStyle(by: .value("类型", kind.rawValue))
-                            }.chartForegroundStyleScale(["出差": Palette.accent, "餐补": Color.orange, "补助": Color.blue])
-                                .frame(height: 245)
+                            distributionChart
                         } else { Text("有报销金额后展示分布").font(.system(size: 12)).foregroundStyle(Palette.muted).frame(maxWidth: .infinity).frame(height: 245) }
                     }.frame(width: 300)
                 }
@@ -97,5 +90,158 @@ struct DashboardView: View {
                 }
             }.padding(32).padding(.top, 32)
         }.frame(maxWidth: .infinity, maxHeight: .infinity)
+            .coordinateSpace(name: coordinateID)
+            .overlay(alignment: .topLeading) {
+                GeometryReader { geometry in
+                    if let details = hoverDetails {
+                        hoverDetail(title: details.title, items: details.items)
+                            .frame(width: DashboardTooltipPlacement.size.width, height: DashboardTooltipPlacement.size.height)
+                            .position(DashboardTooltipPlacement.position(pointer: hoverLocation, avoiding: hoverAvoidance, in: geometry.size))
+                            .animation(.interactiveSpring(response: 0.22, dampingFraction: 0.9), value: hoverLocation)
+                            .transition(.opacity)
+                    }
+                }.allowsHitTesting(false)
+            }
+            .onChange(of: period) { _, _ in hoveredMonth = nil; hoveredKind = nil }
+    }
+    private var monthlyChart: some View {
+        Chart(monthly) { point in
+            BarMark(x: .value("月份", point.date, unit: .month), y: .value("金额（元）", point.amount))
+                .foregroundStyle(Palette.accent.gradient).cornerRadius(4)
+                .opacity(hoveredMonth == nil || hoveredMonth == point.date ? 1 : 0.4)
+        }
+        .chartXAxis { AxisMarks(values: .stride(by: .month)) { _ in AxisValueLabel(format: .dateTime.month(.defaultDigits)) } }
+        .chartYAxisLabel("元")
+        .chartOverlay { proxy in
+            GeometryReader { geometry in
+                ZStack(alignment: .topLeading) {
+                    Rectangle().fill(.clear).contentShape(Rectangle())
+                        .onContinuousHover { phase in
+                            switch phase {
+                            case .active(let location):
+                                guard let frame = proxy.plotFrame, geometry[frame].contains(location),
+                                      let date = proxy.value(atX: location.x - geometry[frame].minX, as: Date.self) else { hoveredMonth = nil; return }
+                                hoveredMonth = monthly.first { DayKey.calendar.isDate($0.date, equalTo: date, toGranularity: .month) }?.date
+                                hoveredKind = nil
+                                let origin = geometry.frame(in: .named(coordinateID)).origin
+                                hoverLocation = CGPoint(x: origin.x + location.x, y: origin.y + location.y)
+                                if let selected = hoveredMonth, let x = proxy.position(forX: selected) {
+                                    let plot = geometry[frame]
+                                    let width = plot.width / 12
+                                    hoverAvoidance = CGRect(x: origin.x + plot.minX + x - width / 2,
+                                                            y: origin.y + plot.minY, width: width * 2, height: plot.height)
+                                }
+                            case .ended: hoveredMonth = nil
+                            }
+                        }
+                }
+            }
+        }
+        .animation(.easeOut(duration: 0.16), value: hoveredMonth)
+        .frame(height: 245)
+    }
+
+    private var distributionChart: some View {
+        Chart(ClaimKind.allCases) { kind in
+            let value = records.filter { $0.kind == kind }.reduce(Int64(0)) { $0 + $1.total }
+            SectorMark(angle: .value("金额", Double(value) / 100), innerRadius: .ratio(0.62),
+                       outerRadius: .ratio(hoveredKind == kind ? 1 : 0.94), angularInset: 3)
+                .foregroundStyle(by: .value("类型", kind.rawValue))
+                .opacity(hoveredKind == nil || hoveredKind == kind ? 1 : 0.4)
+        }
+        .chartForegroundStyleScale(["出差": Palette.accent, "餐补": Color.orange, "补助": Color.purple])
+        .chartOverlay { proxy in
+            GeometryReader { geometry in
+                ZStack(alignment: .topLeading) {
+                    Rectangle().fill(.clear).contentShape(Rectangle())
+                        .onContinuousHover { phase in
+                            switch phase {
+                            case .active(let location):
+                                guard let frame = proxy.plotFrame else { hoveredKind = nil; return }
+                                hoveredMonth = nil
+                                let origin = geometry.frame(in: .named(coordinateID)).origin
+                                hoverLocation = CGPoint(x: origin.x + location.x, y: origin.y + location.y)
+                                hoverAvoidance = geometry[frame].offsetBy(dx: origin.x, dy: origin.y)
+                                hoveredKind = DashboardChartHitTesting.kind(at: location, plot: geometry[frame], values: ClaimKind.allCases.map { kind in
+                                    records.filter { $0.kind == kind }.reduce(Int64(0)) { $0 + $1.total }
+                                })
+                            case .ended: hoveredKind = nil
+                            }
+                        }
+                }
+            }
+        }
+        .animation(.spring(response: 0.28, dampingFraction: 0.8), value: hoveredKind)
+        .frame(height: 245)
+    }
+
+    private var hoverDetails: (title: String, items: [Claim])? {
+        if let point = monthly.first(where: { $0.date == hoveredMonth }) {
+            return (point.date.formatted(.dateTime.year().month().locale(Locale(identifier: "zh_CN"))), point.records)
+        }
+        if let kind = hoveredKind { return ("\(kind.rawValue)报销", records.filter { $0.kind == kind }) }
+        return nil
+    }
+
+    private func hoverDetail(title: String, items: [Claim]) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title).font(.system(size: 12, weight: .semibold))
+            Text("报销总额  \(Money.format(items.reduce(0) { $0 + $1.total }))")
+                .font(.system(size: 13, weight: .semibold)).foregroundStyle(Palette.accent)
+            Text("\(items.count) 条记录 · \(items.reduce(0) { $0 + $1.reimbursementDayCount }) 天 · \(items.reduce(0) { $0 + $1.invoiceCount }) 份发票")
+            Text("发票总额  \(Money.format(items.reduce(0) { $0 + $1.invoiceTotal }))")
+        }.font(.system(size: 11)).foregroundStyle(Palette.ink)
+            .padding(12).frame(maxWidth: .infinity, alignment: .leading)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(Palette.accent.opacity(0.2)))
+            .shadow(color: .black.opacity(0.1), radius: 8, y: 3)
+    }
+
+}
+
+
+// SectorMark starts at twelve o'clock and proceeds clockwise; ignore the hole and legend.
+enum DashboardChartHitTesting {
+    static func kind(at point: CGPoint, plot: CGRect, values: [Int64]) -> ClaimKind? {
+        let radius = min(plot.width, plot.height) / 2
+        guard radius > 0 else { return nil }
+        let dx = point.x - plot.midX, dy = point.y - plot.midY
+        let distance = hypot(dx, dy)
+        guard distance >= radius * 0.62, distance <= radius else { return nil }
+        let total = values.reduce(Int64(0)) { $0 + max(0, $1) }
+        guard total > 0 else { return nil }
+        let angle = (atan2(dx, -dy) + 2 * .pi).truncatingRemainder(dividingBy: 2 * .pi)
+        let amount = angle / (2 * .pi) * Double(total)
+        var cumulative: Double = 0
+        for (kind, value) in zip(ClaimKind.allCases, values) where value > 0 {
+            cumulative += Double(value)
+            if amount < cumulative { return kind }
+        }
+        return nil
+    }
+}
+
+
+enum DashboardTooltipPlacement {
+    static let size = CGSize(width: 232, height: 112)
+    static func position(pointer: CGPoint, avoiding mark: CGRect, in bounds: CGSize) -> CGPoint {
+        let padding: CGFloat = 10, gap: CGFloat = 16
+        func clamped(_ rect: CGRect) -> CGRect {
+            CGRect(x: min(max(padding, rect.minX), max(padding, bounds.width - size.width - padding)),
+                   y: min(max(padding, rect.minY), max(padding, bounds.height - size.height - padding)),
+                   width: size.width, height: size.height)
+        }
+        let preferred = clamped(CGRect(origin: CGPoint(x: pointer.x + gap, y: pointer.y + gap), size: size))
+        if !preferred.intersects(mark.insetBy(dx: -padding, dy: -padding)) { return CGPoint(x: preferred.midX, y: preferred.midY) }
+        let candidates = [
+            CGRect(x: mark.maxX + gap, y: pointer.y - size.height / 2, width: size.width, height: size.height),
+            CGRect(x: mark.minX - gap - size.width, y: pointer.y - size.height / 2, width: size.width, height: size.height),
+            CGRect(x: pointer.x - size.width / 2, y: mark.minY - gap - size.height, width: size.width, height: size.height),
+            CGRect(x: pointer.x - size.width / 2, y: mark.maxY + gap, width: size.width, height: size.height)
+        ].map(clamped).filter { !$0.intersects(mark.insetBy(dx: -padding, dy: -padding)) }
+        let rect = candidates.min { a, b in
+            hypot(a.midX - pointer.x, a.midY - pointer.y) < hypot(b.midX - pointer.x, b.midY - pointer.y)
+        } ?? preferred
+        return CGPoint(x: rect.midX, y: rect.midY)
     }
 }

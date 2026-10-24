@@ -76,7 +76,7 @@ enum WordExporter {
                     body += paragraph("\(person.name)：报销 \(Money.format(person.total(in: claim)))　发票 \(person.invoiceCount) 份　票面 \(Money.format(person.invoiceTotal))")
                 }
             }
-            body += paragraph("发票数量按上传的 PDF 文件计；每份 PDF 的全部页面均附在后面。")
+            body += paragraph("发票数量仅计发票 PDF；行程单不参与统计。每份 PDF 的全部页面均附在后面。")
             for cover in claim.covers {
                 try autoreleasepool {
                     guard let image = NSImage(contentsOf: attachmentRoot.appendingPathComponent(cover.storedName)) else {
@@ -87,7 +87,15 @@ enum WordExporter {
             }
             var halfPageUsed = false
             for expense in claim.expenses {
-                for invoice in expense.invoices {
+                for invoice in expense.attachments {
+                    if attachmentRoot.appendingPathComponent(invoice.storedName).pathExtension.lowercased() != "pdf" {
+                        guard let image = NSImage(contentsOf: attachmentRoot.appendingPathComponent(invoice.storedName)), image.isValid else {
+                            throw ReimburError("行程单图片丢失或损坏：\(invoice.name)")
+                        }
+                        try addImage(image, title: "\(expense.kind.rawValue) · 行程单 · \(invoice.name)")
+                        halfPageUsed = false
+                        continue
+                    }
                     guard let pdf = PDFDocument(url: attachmentRoot.appendingPathComponent(invoice.storedName)), !pdf.isLocked, pdf.pageCount > 0 else {
                         throw ReimburError("发票文件丢失、损坏或已加密：\(invoice.name)")
                     }
@@ -99,7 +107,8 @@ enum WordExporter {
                             let scale = min(2.5, 2600 / max(bounds.width, bounds.height))
                             let image = page.thumbnail(of: NSSize(width: bounds.width * scale, height: bounds.height * scale), for: .mediaBox)
                             let landscape = packLandscapeInvoices && image.size.height / image.size.width <= 0.78
-                            try addImage(image, title: "\(expense.kind.rawValue)\(expense.claimant.map { " · \($0)" } ?? "") · \(invoice.name) · 第 \(index + 1)/\(pdf.pageCount) 页",
+                            let role = expense.invoices.contains(where: { $0.id == invoice.id }) ? "发票" : "行程单"
+                            try addImage(image, title: "\(expense.kind.rawValue)\(expense.claimant.map { " · \($0)" } ?? "") · \(role) · \(invoice.name) · 第 \(index + 1)/\(pdf.pageCount) 页",
                                          newPage: !landscape || !halfPageUsed, maxHeight: landscape ? 4.95 : 10.25)
                             halfPageUsed = landscape ? !halfPageUsed : false
                         }

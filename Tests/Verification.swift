@@ -39,6 +39,16 @@ private struct InteractionView: View {
     }
 }
 
+@MainActor private final class AttachmentNameState: ObservableObject {
+    @Published var attachment: Attachment
+    init(_ attachment: Attachment) { self.attachment = attachment }
+}
+private struct AttachmentNameInteractionView: View {
+    @ObservedObject var state: AttachmentNameState
+    var rename: (String) -> Void
+    var body: some View { EditableAttachmentName(attachment: state.attachment, rename: rename).padding(20).frame(width: 500, height: 80).background(.white) }
+}
+
 final class ReimburChecks {
     private var temporary: URL!
     func setUpWithError() throws {
@@ -196,7 +206,8 @@ final class ReimburChecks {
             let personal = ClaimSummary.renderPerson(claim, person: person)
             expectFalse(personal.contains("个人报销明细"))
             expectFalse(personal.contains("报销人："))
-            expectTrue(personal.contains("出差人：\(person.name)"))
+            expectTrue(personal.contains("出差人：\(person.name)\n"))
+            expectFalse(personal.contains("（1 人）"))
             expectTrue(personal.contains("=\(amount)"))
             expectFalse(personal.contains(person.claimant == "蔡建坤" ? "出差人：孙毅强" : "出差人：蔡建坤"))
         }
@@ -348,7 +359,7 @@ final class ReimburChecks {
         defaults.set(-100, forKey: "defaultAllowance")
         defaults.set(32000, forKey: "defaultHotel")
         let prices = ExpenseDefaults.saved(in: defaults)
-        expectEqual(prices.price(for: .hotel), 32000)
+        expectEqual(prices.price(for: .hotel), 0)
         expectEqual(prices.price(for: .train), 0)
         expectEqual(prices.price(for: .allowance), 0)
         let store = ClaimStore(root: temporary)
@@ -540,11 +551,14 @@ final class ReimburChecks {
             nativeClick(NSPoint(x: 141, y: 71), in: host, window: window)
             expectTrue(state.dates.contains("2026-10-01") == false)
             let number = window.windowNumber
-            let points = (1...20).map { host.convert(NSPoint(x: 181 + CGFloat($0) * 4, y: 71), to: nil) }
+            let forward: [CGFloat] = (1...20).map { 181.0 + CGFloat($0) * 4.0 }
+            let backward: [CGFloat] = (1...20).map { 261.0 - CGFloat($0) * 4.0 }
+            let xs = forward + backward
+            let points = xs.map { host.convert(NSPoint(x: $0, y: 71), to: nil) }
             DispatchQueue.global().async {
-                Thread.sleep(forTimeInterval: 0.35)
+                Thread.sleep(forTimeInterval: 0.001)
                 for (index, point) in points.enumerated() {
-                    let type: NSEvent.EventType = index == 19 ? .leftMouseUp : .leftMouseDragged
+                    let type: NSEvent.EventType = index == points.count - 1 ? .leftMouseUp : .leftMouseDragged
                     let event = NSEvent.mouseEvent(with: type, location: point, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: number, context: nil, eventNumber: 700, clickCount: 1, pressure: type == .leftMouseUp ? 0 : 1)!
                     NSApplication.shared.postEvent(event, atStart: false)
                     Thread.sleep(forTimeInterval: 0.01)
@@ -553,7 +567,7 @@ final class ReimburChecks {
             let down = NSEvent.mouseEvent(with: .leftMouseDown, location: host.convert(NSPoint(x: 181, y: 71), to: nil), modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: number, context: nil, eventNumber: 700, clickCount: 1, pressure: 1)!
             NSApplication.shared.sendEvent(down)
             pumpNativeEvents(0.9)
-            expectEqual(state.dates, ["2026-10-02", "2026-10-03", "2026-10-04"])
+            expectTrue(state.dates.isEmpty)
         }
     }
 
@@ -685,17 +699,631 @@ final class ReimburChecks {
     }
 
     func testCalendarSweepIsIdempotentAndSupportsErasing() {
-        var selection: Set<String> = ["2026-10-01"]
+        var selection: Set<String> = ["01", "03"]
         var paint = CalendarPaintSelection()
-        paint.visit("2026-10-02", selection: &selection)
-        paint.visit("2026-10-03", selection: &selection)
-        paint.visit("2026-10-02", selection: &selection)
-        expectEqual(selection, ["2026-10-01", "2026-10-02", "2026-10-03"])
+        for key in ["02", "03", "04", "04", "03", "02"] { paint.visit(key, selection: &selection) }
+        expectEqual(selection, ["01", "03"])
+        paint.visit("04", selection: &selection)
+        expectEqual(selection, ["01", "02", "03", "04"])
         paint = CalendarPaintSelection()
-        paint.visit("2026-10-02", selection: &selection)
-        paint.visit("2026-10-03", selection: &selection)
-        paint.visit("2026-10-02", selection: &selection)
-        expectEqual(selection, ["2026-10-01"])
+        for key in ["02", "03", "04"] { paint.visit(key, selection: &selection) }
+        expectEqual(selection, ["01"])
+        paint.visit("02", selection: &selection)
+        expectEqual(selection, ["01", "02", "03", "04"])
+        paint.visit("03", selection: &selection)
+        expectEqual(selection, ["01", "04"])
+    }
+
+    func testTravelerRenamePreservesExpenses() throws {
+        var claim = multiPersonClaim()
+        let before = claim
+        expectTrue(claim.renameTraveler(from: "蔡建坤", to: " 蔡先生 "))
+        expectEqual(claim.travelerNames, ["蔡先生", "孙毅强"])
+        expectEqual(claim.total, before.total)
+        expectEqual(claim.invoiceTotal, before.invoiceTotal)
+        expectEqual(claim.personBreakdowns.map { $0.total(in: claim) }, before.personBreakdowns.map { $0.total(in: before) })
+        expectEqual(claim.expenses.map(\.id), before.expenses.map(\.id))
+        var expected = before.expenses
+        for index in expected.indices where expected[index].claimant == "蔡建坤" { expected[index].claimant = "蔡先生" }
+        expectEqual(claim.expenses, expected)
+        let renamed = claim
+        expectFalse(claim.renameTraveler(from: "蔡先生", to: "孙毅强"))
+        expectFalse(claim.renameTraveler(from: "蔡先生", to: " "))
+        expectEqual(claim, renamed)
+        let database = try Database(root: temporary)
+        try database.save(claim)
+        expectEqual(try database.load()[0], renamed)
+    }
+
+    @MainActor func testNativeTravelerDoubleClickRename() throws {
+        let state = InteractionState()
+        let extraNames = (1...7).map { "报销人\($0)" }
+        state.names = ["张三", "李四"] + extraNames
+        let view = VStack {
+            PeopleTagInput(names: Binding(get: { state.names }, set: { state.names = $0 }))
+            Color.clear.frame(height: 60).contentShape(Rectangle())
+        }.padding(20).frame(width: 500, height: 140).background(.white)
+        let qa = ProcessInfo.processInfo.environment["REIMBUR_QA_DIR"].map { URL(fileURLWithPath: $0) } ?? temporary!
+        try captureView(view, width: 500, height: 140, to: qa.appendingPathComponent("traveler-rename.png")) { window, host in
+            nativeClick(NSPoint(x: 45, y: 36), in: host, window: window)
+            nativeClick(NSPoint(x: 45, y: 36), in: host, window: window, count: 2)
+            guard let editor = window.firstResponder as? NSTextView else { fail("Double-click must focus inline name editor"); return }
+            editor.selectAll(nil); editor.insertText("张先生", replacementRange: NSRange(location: NSNotFound, length: 0))
+            pumpNativeEvents(); editor.insertNewline(nil); pumpNativeEvents()
+            expectEqual(state.names, ["张先生", "李四"] + extraNames)
+            nativeClick(NSPoint(x: 45, y: 36), in: host, window: window)
+            nativeClick(NSPoint(x: 45, y: 36), in: host, window: window, count: 2)
+            guard let editor = window.firstResponder as? NSTextView else { fail("Second double-click must focus inline editor"); return }
+            editor.selectAll(nil); editor.insertText("张女士", replacementRange: NSRange(location: NSNotFound, length: 0))
+            pumpNativeEvents()
+            nativeClick(NSPoint(x: 350, y: 105), in: host, window: window)
+            expectEqual(state.names, ["张女士", "李四"] + extraNames)
+        }
+    }
+
+    func testDashboardSectorHoverHitTesting() {
+        let plot = CGRect(x: 20, y: 30, width: 200, height: 200)
+        let values: [Int64] = [100, 200, 100]
+        expectEqual(DashboardChartHitTesting.kind(at: CGPoint(x: 176, y: 74), plot: plot, values: values), .trip)
+        expectEqual(DashboardChartHitTesting.kind(at: CGPoint(x: 120, y: 210), plot: plot, values: values), .meal)
+        expectEqual(DashboardChartHitTesting.kind(at: CGPoint(x: 64, y: 74), plot: plot, values: values), .allowance)
+        expectNil(DashboardChartHitTesting.kind(at: CGPoint(x: 120, y: 130), plot: plot, values: values))
+        expectNil(DashboardChartHitTesting.kind(at: CGPoint(x: 5, y: 130), plot: plot, values: values))
+        expectNil(DashboardChartHitTesting.kind(at: CGPoint(x: 176, y: 74), plot: plot, values: [0, 0, 0]))
+        expectEqual(DashboardChartHitTesting.kind(at: CGPoint(x: 176, y: 74), plot: plot, values: [0, 100, 0]), .meal)
+    }
+
+    @MainActor func testNativeDashboardHover() throws {
+        var meal = Claim.make(.meal)
+        meal.dates = ["2026-10-02", "2026-10-03"]
+        meal.expenses[0].unitPrice = 10000
+        let view = DashboardView(claims: [sampleClaim(), meal], period: .constant(ClaimPeriodFilter(year: 2026)))
+            .frame(width: 1150, height: 800).background(Palette.canvas)
+        let qa = ProcessInfo.processInfo.environment["REIMBUR_QA_DIR"].map { URL(fileURLWithPath: $0) } ?? temporary!
+        try captureView(view, width: 1150, height: 800, to: qa.appendingPathComponent("dashboard-hover.png")) { window, host in
+            window.acceptsMouseMovedEvents = true
+            @MainActor func hover(_ point: NSPoint) {
+                let location = host.convert(point, to: nil)
+                let enter = NSEvent.enterExitEvent(with: .mouseEntered, location: location, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil, eventNumber: 1, trackingNumber: 0, userData: nil)!
+                host.mouseEntered(with: enter)
+                let move = NSEvent.mouseEvent(with: .mouseMoved, location: location, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil, eventNumber: 2, clickCount: 0, pressure: 0)!
+                host.mouseMoved(with: move)
+                pumpNativeEvents(0.4)
+            }
+            hover(NSPoint(x: 593, y: 440))
+            let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds)!
+            host.cacheDisplay(in: host.bounds, to: bitmap)
+            try? bitmap.representation(using: .png, properties: [:])!.write(to: qa.appendingPathComponent("dashboard-monthly-hover.png"))
+            hover(NSPoint(x: 1040, y: 450))
+        }
+    }
+
+    func testTooltipAvoidsMarksAndFollowsCursor() {
+        let bounds = CGSize(width: 1150, height: 800)
+        for mark in [CGRect(x: 550, y: 340, width: 90, height: 240), CGRect(x: 830, y: 340, width: 240, height: 220)] {
+            let first = CGPoint(x: mark.midX, y: mark.midY - 30)
+            let second = CGPoint(x: mark.midX, y: mark.midY + 30)
+            let start = DashboardTooltipPlacement.position(pointer: first, avoiding: mark, in: bounds)
+            let end = DashboardTooltipPlacement.position(pointer: second, avoiding: mark, in: bounds)
+            expectFalse(start == end)
+            for point in [start, end] {
+                let rect = CGRect(x: point.x - DashboardTooltipPlacement.size.width / 2, y: point.y - DashboardTooltipPlacement.size.height / 2,
+                                  width: DashboardTooltipPlacement.size.width, height: DashboardTooltipPlacement.size.height)
+                expectFalse(rect.intersects(mark))
+                expectTrue(CGRect(origin: .zero, size: bounds).contains(rect))
+            }
+        }
+    }
+
+    @MainActor func testDefaultPeopleAndAttachmentNaming() throws {
+        let suite = "Reimbur-default-people-\(UUID())"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(AppPreferences.encodeNames(["张三", "李四"]), forKey: "defaultTravelerNames")
+        defaults.set(6000, forKey: "defaultSubsidy")
+        defaults.set(2500, forKey: "defaultMeal")
+        defaults.set("{报销人}-{费用类型}-{发票号码}", forKey: "invoiceNameFormat")
+        defaults.set("{报销人}-行程-{行程单号}", forKey: "itineraryNameFormat")
+        let store = ClaimStore(root: temporary)
+        let first = store.create(.trip, defaults: ExpenseDefaults.saved(in: defaults))!
+        let claim = store.claims.first { $0.id == first }!
+        expectEqual(claim.travelerNames, ["张三", "李四"])
+        expectEqual(claim.expenses.map(\.claimant), ["张三", "李四"])
+        expectEqual(claim.expenses.map(\.unitPrice), [6000, 6000])
+        let mealID = store.create(.meal, defaults: ExpenseDefaults.saved(in: defaults))!
+        expectEqual(store.claims.first { $0.id == mealID }?.expenses.first?.unitPrice, 2500)
+        defaults.set(AppPreferences.encodeNames(["王五"]), forKey: "defaultTravelerNames")
+        expectEqual(store.claims.first { $0.id == first }?.travelerNames, ["张三", "李四"])
+        let naming = AttachmentNaming.saved(in: defaults)
+        let number = "12345678901234567890"
+        expectEqual(AttachmentNaming.number(in: "发 票 号 码：\n" + number, role: .invoice), number)
+        expectEqual(AttachmentNaming.number(in: "发票号码: 12345678", role: .invoice), "12345678")
+        expectEqual(AttachmentNaming.number(in: "订单号：DIDI-123456", role: .itinerary), "DIDI-123456")
+        expectEqual(AttachmentNaming.number(in: "", filename: "电子发票" + number, role: .invoice), number)
+        expectNil(AttachmentNaming.number(in: "金额 100.00 日期2026-10-24", role: .invoice))
+        let expense = Expense(kind: .taxi, claimant: "张三")
+        let source = URL(fileURLWithPath: "/tmp/原始文件.pdf")
+        expectEqual(naming.filename(source: source, number: number, claim: claim, expense: expense, role: .invoice), "张三-打车-" + number + ".pdf")
+        expectEqual(naming.filename(source: source, number: "DIDI123", claim: claim, expense: expense, role: .itinerary), "张三-行程-DIDI123.pdf")
+        expectEqual(AttachmentNaming().filename(source: source, number: nil, claim: claim, expense: expense, role: .invoice), "张三原始文件.pdf")
+        expectEqual(AppPreferences.caption(String(repeating: "字", count: 20)).count, 14)
+        expectFalse(AttachmentNaming.safeStem("../危险:名称/票据").contains("/"))
+    }
+
+    @MainActor func testDailyReimbursementsKeepInvoiceTotalsIndependent() throws {
+        let source = temporary.appendingPathComponent("发票.pdf")
+        try makePDF(at: source, pages: 1, number: "12345678901234567890")
+        for kind in [ClaimKind.meal, .allowance] {
+            let root = temporary.appendingPathComponent(kind.id)
+            let store = ClaimStore(root: root)
+            var claim = Claim.make(kind)
+            claim.setTravelerNames(["张三"])
+            claim.dates = ["2026-10-23", "2026-10-24"]
+            claim.expenses[0].unitPrice = 2500
+            let id = claim.expenses[0].id
+            claim = try store.importFiles([source], into: claim, expenseID: id)
+            expectEqual(claim.total, 5000)
+            expectEqual(claim.invoiceTotal, 55300)
+            expectEqual(claim.difference, -50300)
+            expectEqual(claim.personBreakdowns[0].total(in: claim), 5000)
+            expectEqual(claim.expenseGroups[0].total(in: claim), 5000)
+            expectNil(claim.expenses[0].totalAmount)
+            claim.expenses[0].invoices[0].amount = 10000
+            claim.expenses[0].synchronizeInvoiceTotal()
+            expectEqual(claim.total, 5000)
+            expectEqual(claim.invoiceTotal, 10000)
+            claim.dates.insert("2026-10-25")
+            expectEqual(claim.total, 7500)
+            claim = try store.importFiles([source], into: claim, expenseID: id)
+            expectEqual(claim.total, 7500)
+            expectEqual(claim.invoiceTotal, 65300)
+            claim = store.removeAttachment(claim.expenses[0].invoices[0], from: claim, expenseID: id)!
+            expectEqual(claim.total, 7500)
+            expectEqual(claim.invoiceTotal, 55300)
+            // Records saved by v0.8.0 must recover their daily rate and dates on load.
+            claim.expenses[0].totalAmount = 55300
+            claim.expenses[0].invoiceTotalLinked = true
+            expectEqual(claim.total, 7500)
+            try Database(root: root).save(claim)
+            let loaded = ClaimStore(root: root).claims[0]
+            expectEqual(loaded.total, 7500)
+            expectEqual(loaded.invoiceTotal, 55300)
+            expectEqual(loaded.invoiceCount, 1)
+            expectEqual(loaded.expenses[0].unitPrice, 2500)
+            expectEqual(loaded.expenses[0].invoices, claim.expenses[0].invoices)
+            expectNil(loaded.expenses[0].totalAmount)
+            expectNil(loaded.expenses[0].invoiceTotalLinked)
+            let persisted = try Database(root: root).load()[0]
+            expectNil(persisted.expenses[0].totalAmount)
+            expectNil(persisted.expenses[0].invoiceTotalLinked)
+            let summary = ClaimSummary.renderOverview(loaded)
+            expectTrue(summary.contains("*总额：75.00=75.00"))
+            expectTrue(summary.contains("*发票金额：553.00"))
+            expectTrue(loaded.expenses[0].formula(in: loaded).contains("3 天 ×"))
+        }
+    }
+
+    @MainActor func testInvoiceTotalsRoutesAndDirectHotelPrices() throws {
+        expectEqual(AttachmentRecognition.trainRoute(in: "出发站：上海虹桥\n到达站：杭州东"), RailRoute(origin: "上海虹桥", destination: "杭州东"))
+        expectEqual(AttachmentRecognition.trainRoute(in: "上海虹桥 → 杭州东"), RailRoute(origin: "上海虹桥", destination: "杭州东"))
+        expectEqual(AttachmentRecognition.trainRoute(in: "上海虹桥\nShanghaihongqiao\nG1234\n杭州东\nHangzhoudong"), RailRoute(origin: "上海虹桥", destination: "杭州东"))
+        expectNil(AttachmentRecognition.trainRoute(in: "电子发票\n发票号码：12345678\n价税合计¥10.00"))
+        let root = temporary.appendingPathComponent("db")
+        var old = Claim.make(.trip)
+        old.setTravelerNames(["张三"])
+        old.dates = ["2026-10-21", "2026-10-22", "2026-10-23"]
+        old.expenses = [Expense(kind: .hotel, unitPrice: 32000, quantity: 2)]
+        try Database(root: root).save(old)
+        let store = ClaimStore(root: root)
+        var migrated = store.claims[0]
+        expectEqual(migrated.total, 128000)
+        expectEqual(migrated.expenses[0].totalAmount, 128000)
+        migrated.dates = ["2026-10-24"]
+        expectEqual(migrated.total, 128000)
+        migrated.expenses[0].setTotalAmount(25000)
+        expectEqual(migrated.total, 25000)
+        expectTrue(store.save(migrated))
+        expectEqual(ClaimStore(root: root).claims[0].total, 25000)
+        var claim = Claim.make(.trip)
+        claim.setTravelerNames(["张三"])
+        claim.dates = ["2026-10-21", "2026-10-22"]
+        claim.expenses = [Expense(kind: .train, unitPrice: 1000, claimant: "张三")]
+        let id = claim.expenses[0].id
+        let pdf = temporary.appendingPathComponent("车票.pdf")
+        try makePDF(at: pdf, pages: 1, number: "12345678901234567890")
+        claim = try store.importFiles([pdf, pdf], into: claim, expenseID: id)
+        expectEqual(claim.total, 110600)
+        expectEqual(claim.invoiceTotal, 110600)
+        expectEqual(claim.difference, 0)
+        expectEqual(claim.expenseGroups[0].total(in: claim), 110600)
+        expectEqual(claim.personBreakdowns[0].total(in: claim), 110600)
+        expectEqual(claim.expenses[0].origin, "上海虹桥")
+        expectEqual(claim.expenses[0].destination, "杭州东")
+        let removed = claim.expenses[0].invoices[1]
+        claim = store.removeAttachment(removed, from: claim, expenseID: id)!
+        expectEqual(claim.total, 55300)
+        claim.expenses[0].setTotalAmount(60000)
+        expectEqual(claim.total, 60000)
+        claim.expenses[0].invoices[0].amount = 56000
+        claim.expenses[0].synchronizeInvoiceTotal()
+        expectEqual(claim.total, 56000)
+        let unknown = temporary.appendingPathComponent("无法识别金额.pdf")
+        try makePDF(at: unknown, pages: 1, number: "87654321", amount: nil)
+        claim.expenses[0].setTotalAmount(70000)
+        claim = try store.importFiles([unknown], into: claim, expenseID: id)
+        expectEqual(claim.total, 70000)
+        claim.addExpense(.hotel, unitPrice: 0)
+        let hotel = claim.expenses[1].id
+        claim.expenses[1].setTotalAmount(90000)
+        claim = try store.importFiles([pdf], into: claim, expenseID: hotel)
+        expectEqual(claim.expenses[1].total(in: claim), 55300)
+        expectEqual(claim.total, 125300)
+        expectTrue(ClaimSummary.renderOverview(claim).contains("住宿总价"))
+        claim.dates = []
+        expectEqual(claim.expenses[1].total(in: claim), 55300)
+        expectTrue(store.save(claim))
+        expectEqual(ClaimStore(root: root).claims.first { $0.id == claim.id }?.total, 125300)
+        var meal = Claim.make(.meal)
+        meal.dates = ["2026-10-21", "2026-10-22"]
+        meal.expenses[0].unitPrice = 2000
+        meal = try store.importFiles([pdf], into: meal, expenseID: meal.expenses[0].id)
+        expectEqual(meal.total, 4000)
+        meal.expenses[0].setDailyPrice(3000)
+        expectEqual(meal.total, 6000)
+        if let path = ProcessInfo.processInfo.environment["REIMBUR_QA_DIR"] {
+            let qa = URL(fileURLWithPath: path)
+            for kind in [ExpenseKind.train, .hotel] {
+                var screen = claim
+                screen.expenses = claim.expenses.filter { $0.kind == kind }
+                screen.dates = ["2026-10-21", "2026-10-22"]
+                try captureView(ClaimEditor(claim: screen).environmentObject(store).textFieldStyle(.roundedBorder).background(Palette.canvas).tint(Palette.accent),
+                                width: 1100, height: 1050, to: qa.appendingPathComponent("\(kind == .hotel ? "hotel-total" : "train-route")-editor.png")) { _, host in
+                    @MainActor func findScroll(_ view: NSView) -> NSScrollView? {
+                        if let scroll = view as? NSScrollView { return scroll }
+                        return view.subviews.lazy.compactMap { findScroll($0) }.first
+                    }
+                    if let scroll = findScroll(host), let document = scroll.documentView {
+                        scroll.contentView.scroll(to: NSPoint(x: 0, y: max(0, document.bounds.height - scroll.contentView.bounds.height)))
+                        scroll.reflectScrolledClipView(scroll.contentView)
+                        pumpNativeEvents()
+                    }
+                }
+            }
+            expectEqual(store.claims.first { $0.id == claim.id }?.expenses.first { $0.kind == .hotel }?.invoiceTotalLinked, true)
+            meal.expenses[0].synchronizeInvoiceTotal()
+            expectTrue(store.save(meal))
+            try captureView(ClaimEditor(claim: meal).environmentObject(store).textFieldStyle(.roundedBorder).background(Palette.canvas).tint(Palette.accent),
+                            width: 1100, height: 1050, to: qa.appendingPathComponent("meal-invoice-total.png"))
+            expectEqual(store.claims.first { $0.id == meal.id }?.total, 6000)
+        }
+    }
+
+    func testScannedRailTicketRecognizesRouteAndAmount() throws {
+        let source = temporary.appendingPathComponent("铁路电子客票.pdf")
+        try makePDF(at: source, pages: 1, number: "12345678901234567890")
+        let original = PDFDocument(url: source)!
+        let image = original.page(at: 0)!.thumbnail(of: NSSize(width: 1684, height: 1190), for: .mediaBox)
+        let scan = PDFDocument()
+        scan.insert(PDFPage(image: image)!, at: 0)
+        let metadata = AttachmentRecognition.read(pdf: scan, source: source, role: .invoice, kind: .train)
+        expectEqual(metadata.amount, 55300)
+        expectEqual(metadata.route, RailRoute(origin: "上海虹桥", destination: "杭州东"))
+    }
+
+    @MainActor func testAttachmentRenamePersistsAndKeepsFilesUsable() throws {
+        let store = ClaimStore(root: temporary.appendingPathComponent("db"))
+        var claim = Claim.make(.trip)
+        claim.setTravelerNames(["张三"])
+        claim.expenses = [Expense(kind: .taxi, claimant: "张三")]
+        let id = claim.expenses[0].id
+        let pdf = temporary.appendingPathComponent("原发票.pdf")
+        try makePDF(at: pdf, pages: 1, number: "12345678")
+        claim = try store.importFiles([pdf], into: claim, expenseID: id)
+        claim = try store.importFiles([pdf], into: claim, expenseID: id, role: .itinerary)
+        let old = claim.expenses[0].invoices[0]
+        let state = AttachmentNameState(old)
+        let qa = ProcessInfo.processInfo.environment["REIMBUR_QA_DIR"].map { URL(fileURLWithPath: $0) } ?? temporary!
+        let view = AttachmentNameInteractionView(state: state) { stem in
+            do {
+                claim = try store.renameAttachment(state.attachment, to: stem, in: claim, expenseID: id)
+                state.attachment = claim.expenses[0].invoices[0]
+            } catch { fail(error.localizedDescription) }
+        }
+        try captureView(view, width: 500, height: 80, to: qa.appendingPathComponent("rename-invoice.png")) { window, host in
+            nativeClick(NSPoint(x: 100, y: 40), in: host, window: window)
+            pumpNativeEvents()
+            guard let editor = window.firstResponder as? NSTextView else { fail("Click filename must focus name editor"); return }
+            editor.selectAll(nil); editor.insertText("临时发票", replacementRange: NSRange(location: NSNotFound, length: 0))
+            editor.insertNewline(nil)
+            pumpNativeEvents()
+            expectEqual(state.attachment.name, "临时发票.pdf")
+            nativeClick(NSPoint(x: 100, y: 40), in: host, window: window)
+            guard let blurEditor = window.firstResponder as? NSTextView else { fail("Second click must focus name editor"); return }
+            blurEditor.selectAll(nil); blurEditor.insertText("打车报销发票", replacementRange: NSRange(location: NSNotFound, length: 0))
+            pumpNativeEvents()
+            nativeClick(NSPoint(x: 100, y: 5), in: host, window: window)
+            expectEqual(state.attachment.name, "打车报销发票.pdf")
+            nativeClick(NSPoint(x: 100, y: 40), in: host, window: window)
+            guard let cancelEditor = window.firstResponder as? NSTextView else { fail("Click must focus name editor before cancel"); return }
+            cancelEditor.selectAll(nil); cancelEditor.insertText("不保存的名称", replacementRange: NSRange(location: NSNotFound, length: 0))
+            let escape = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                          windowNumber: window.windowNumber, context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53)!
+            window.sendEvent(escape)
+            pumpNativeEvents()
+            expectEqual(state.attachment.name, "打车报销发票.pdf")
+        }
+        expectFalse(FileManager.default.fileExists(atPath: store.url(for: old).path))
+        claim = try store.renameAttachment(claim.expenses[0].itineraries![0], to: "打车报销发票", in: claim, expenseID: id)
+        expectEqual(claim.expenses[0].itineraries?[0].name, "打车报销发票_1.pdf")
+        claim = try store.renameAttachment(claim.expenses[0].invoices[0], to: "TAXI", in: claim, expenseID: id)
+        claim = try store.renameAttachment(claim.expenses[0].invoices[0], to: "taxi", in: claim, expenseID: id)
+        expectEqual(claim.expenses[0].invoices[0].name, "taxi.pdf")
+        expectThrowsError(try store.renameAttachment(claim.expenses[0].invoices[0], to: " ", in: claim, expenseID: id))
+        let legacy = Attachment(name: "旧附件.pdf", storedName: UUID().uuidString + ".pdf", amount: 1200)
+        try FileManager.default.copyItem(at: pdf, to: store.url(for: legacy))
+        claim.expenses[0].invoices.append(legacy)
+        expectTrue(store.save(claim))
+        claim = try store.renameAttachment(legacy, to: "旧附件改名", in: claim, expenseID: id)
+        expectFalse(FileManager.default.fileExists(atPath: store.url(for: legacy).path))
+        expectEqual(claim.expenses[0].invoices.last?.name, "旧附件改名.pdf")
+        expectEqual(claim.expenses[0].invoices.last?.amount, 1200)
+        let loaded = ClaimStore(root: store.root).claims[0]
+        expectEqual(loaded.expenses, claim.expenses)
+        let originals = try Data(contentsOf: pdf)
+        for attachment in loaded.attachments {
+            expectEqual(try Data(contentsOf: store.url(for: attachment)), originals)
+            store.previewAttachment(attachment, in: loaded)
+            expectNil(AttachmentPreviewSession(request: store.preview!).errorMessage)
+        }
+        let archive = temporary.appendingPathComponent("renamed.zip")
+        try InvoiceArchiveExporter.export(claim: loaded, attachmentRoot: store.root.appendingPathComponent("Attachments"), to: archive)
+        let unpacked = temporary.appendingPathComponent("unpacked")
+        try run("/usr/bin/ditto", ["-x", "-k", archive.path, unpacked.path])
+        for attachment in loaded.attachments {
+            expectEqual(try Data(contentsOf: unpacked.appendingPathComponent(loaded.title).appendingPathComponent(attachment.name)), originals)
+        }
+    }
+
+    @MainActor func testImportedAttachmentPreviewAndAutomaticAmounts() throws {
+        expectEqual(AttachmentRecognition.amount(in: "金额 858.49 税额 51.51\n价税合计（大写）玖佰壹拾圆整\n（小写）\n¥910.00"), 91000)
+        expectEqual(AttachmentRecognition.amount(in: "价税合计（大写）叁拾伍圆肆角壹分 ¥35.41\n（小写）\n备注"), 3541)
+        expectEqual(AttachmentRecognition.amount(in: "票价（人民币）：￥1,234.50"), 123450)
+        expectEqual(AttachmentRecognition.amount(in: "实付金额：88.80元"), 8880)
+        expectEqual(AttachmentRecognition.amount(in: "价 税 合 计 ¥0.00"), 0)
+        expectNil(AttachmentRecognition.amount(in: "单价 ¥99.00\n数量2\n金额198.00 税额5.94"))
+        expectNil(AttachmentRecognition.amount(in: "价税合计 ¥-35.41"))
+        expectNil(AttachmentRecognition.amount(in: "价税合计 ¥35.411"))
+        let store = ClaimStore(root: temporary.appendingPathComponent("db"))
+        var claim = Claim.make(.trip)
+        claim.setTravelerNames(["张三"])
+        claim.expenses = [Expense(kind: .taxi, claimant: "张三")]
+        let id = claim.expenses[0].id
+        let invoice = temporary.appendingPathComponent("原发票.pdf")
+        try makePDF(at: invoice, pages: 1, number: "12345678901234567890")
+        claim = try store.importFiles([invoice], into: claim, expenseID: id, naming: AttachmentNaming())
+        expectEqual(claim.expenses[0].invoices[0].amount, 55300)
+        let document = PDFDocument(url: invoice)!
+        let image = document.page(at: 0)!.thumbnail(of: NSSize(width: 1684, height: 1190), for: .mediaBox)
+        let scanned = PDFDocument()
+        scanned.insert(PDFPage(image: image)!, at: 0)
+        let scan = temporary.appendingPathComponent("扫描件.pdf")
+        expectTrue(scanned.write(to: scan))
+        claim = try store.importFiles([scan], into: claim, expenseID: id, naming: AttachmentNaming())
+        expectEqual(claim.expenses[0].invoices[1].amount, 55300)
+        let itinerary = temporary.appendingPathComponent("没有编号的行程单.pdf")
+        try makePDF(at: itinerary, pages: 1)
+        claim = try store.importFiles([itinerary], into: claim, expenseID: id, role: .itinerary, naming: AttachmentNaming())
+        expectEqual(claim.expenses[0].itineraries?[0].name, "张三12345678901234567890_2.pdf")
+        expectEqual(claim.expenses[0].itineraries?[0].amount, 0)
+        var ambiguous = claim.expenses[0]
+        ambiguous.invoices.append(Attachment(name: "其他发票.pdf", storedName: "other.pdf", number: "99999999"))
+        expectEqual(AttachmentNaming().filename(source: itinerary, number: nil, claim: claim, expense: ambiguous, role: .itinerary), "张三没有编号的行程单.pdf")
+        let imageFile = temporary.appendingPathComponent("行程图片.png")
+        var rect = CGRect(origin: .zero, size: image.size)
+        let bitmap = NSBitmapImageRep(cgImage: image.cgImage(forProposedRect: &rect, context: nil, hints: nil)!)
+        try bitmap.representation(using: .png, properties: [:])!.write(to: imageFile)
+        let custom = AttachmentNaming(itineraryFormat: "{报销人}-行程-{行程单号}")
+        claim = try store.importFiles([imageFile], into: claim, expenseID: id, role: .itinerary, naming: custom)
+        expectEqual(claim.expenses[0].itineraries?.last?.name, "张三-行程-12345678901234567890.png")
+        // Legacy flat files and new private directories must work in one preview gallery.
+        let legacy = Attachment(name: "旧发票.pdf", storedName: "legacy.pdf", amount: 100)
+        try FileManager.default.copyItem(at: invoice, to: store.url(for: legacy))
+        claim.expenses[0].invoices.append(legacy)
+        for attachment in claim.attachments {
+            store.previewAttachment(attachment, in: claim)
+            guard let request = store.preview else { fail("Missing preview request"); continue }
+            expectEqual(request.url, store.url(for: attachment))
+            let session = AttachmentPreviewSession(request: request)
+            expectNil(session.errorMessage)
+            expectTrue(session.image != nil)
+            if session.canMoveNext { session.move(1); expectNil(session.errorMessage) }
+        }
+        claim.expenses[0].invoices[0].amount = 12345
+        expectTrue(store.save(claim))
+        let restored = ClaimStore(root: store.root).claims[0]
+        expectEqual(restored.expenses[0].invoices[0].amount, 12345)
+        expectEqual(restored.invoiceCount, 3)
+        expectEqual(restored.invoiceTotal, 67745)
+        if let path = ProcessInfo.processInfo.environment["REIMBUR_QA_DIR"] {
+            let qa = URL(fileURLWithPath: path)
+            store.previewAttachment(claim.expenses[0].invoices[0], in: claim)
+            try captureView(AttachmentPreview(request: store.preview!), width: 1000, height: 740, to: qa.appendingPathComponent("imported-pdf-preview.png"))
+            try captureView(ClaimEditor(claim: claim).environmentObject(store).background(Palette.canvas).tint(Palette.accent), width: 1100, height: 1000, to: qa.appendingPathComponent("export-buttons.png"))
+        }
+    }
+
+    @MainActor func testUpdatedDefaultsLayout() throws {
+        let suite = "Reimbur-layout-\(UUID())"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(AppPreferences.encodeNames(["张三", "李四"]), forKey: "defaultTravelerNames")
+        defaults.set(6000, forKey: "defaultSubsidy")
+        defaults.set(2500, forKey: "defaultMeal")
+        defaults.set(99999, forKey: "defaultHotel")
+        defaults.set(99999, forKey: "defaultAllowance")
+        let values = ExpenseDefaults.saved(in: defaults)
+        expectEqual(values.travelerNames, ["张三", "李四"])
+        expectEqual(values.subsidy, 6000)
+        expectEqual(values.meal, 2500)
+        expectEqual(values.price(for: .hotel), 0)
+        expectEqual(values.price(for: .allowance), 0)
+        let store = ClaimStore(root: temporary.appendingPathComponent("db"))
+        if let path = ProcessInfo.processInfo.environment["REIMBUR_QA_DIR"] {
+            let qa = URL(fileURLWithPath: path)
+            try captureView(SettingsView().environmentObject(store).defaultAppStorage(defaults).textFieldStyle(.roundedBorder).background(Palette.canvas).tint(Palette.accent),
+                            width: 1050, height: 1200, to: qa.appendingPathComponent("settings-defaults.png"))
+            try captureView(WorkspaceView().environmentObject(store).defaultAppStorage(defaults), width: 1440, height: 1000, to: qa.appendingPathComponent("settings-spacing.png"))
+        }
+    }
+
+    @MainActor func testDuplicateAttachmentNamesReceiveNumberedSuffixes() throws {
+        let root = temporary.appendingPathComponent("db")
+        let store = ClaimStore(root: root)
+        var claim = Claim.make(.trip)
+        claim.setTravelerNames(["张三"])
+        claim.expenses = [Expense(kind: .taxi, claimant: "张三"), Expense(kind: .train, claimant: "张三")]
+        let taxi = claim.expenses[0].id, train = claim.expenses[1].id
+        let source = temporary.appendingPathComponent("原件.pdf")
+        try makePDF(at: source, pages: 1, number: "12345678")
+        let naming = AttachmentNaming(invoiceFormat: "{报销人}{发票号码}", itineraryFormat: "{报销人}{发票号码}")
+        let stem = "张三12345678"
+        claim = try store.importFiles([source, source, source], into: claim, expenseID: taxi, naming: naming)
+        expectEqual(claim.expenses[0].invoices.map(\.name), [stem + ".pdf", stem + "_1.pdf", stem + "_2.pdf"])
+        claim = try store.importFiles([source], into: claim, expenseID: train, naming: naming)
+        expectEqual(claim.expenses[1].invoices[0].name, stem + "_3.pdf")
+        claim = try store.importFiles([source], into: claim, expenseID: taxi, role: .itinerary, naming: naming)
+        expectEqual(claim.expenses[0].itineraries?[0].name, stem + "_4.pdf")
+        let reopened = ClaimStore(root: root)
+        claim = reopened.claims.first { $0.id == claim.id }!
+        claim = try reopened.importFiles([source], into: claim, expenseID: taxi, naming: naming)
+        expectEqual(claim.expenses[0].invoices.last?.name, stem + "_5.pdf")
+        let originals = try Data(contentsOf: source)
+        for attachment in claim.expenses.flatMap(\.attachments) {
+            expectEqual(reopened.url(for: attachment).lastPathComponent, attachment.name)
+            expectEqual(try Data(contentsOf: reopened.url(for: attachment)), originals)
+        }
+        // A new upload must also respect a literal name that already contains a suffix.
+        var used: Set<String> = ["invoice.pdf", "invoice_1.pdf", "invoice_3.pdf"]
+        expectEqual(AttachmentNaming.uniqueFilename("INVOICE.PDF", usedNames: &used), "INVOICE_2.PDF")
+        expectEqual(AttachmentNaming.uniqueFilename("invoice.pdf", usedNames: &used), "invoice_4.pdf")
+        expectEqual(AttachmentNaming.uniqueFilename("invoice.png", usedNames: &used), "invoice.png")
+        // Legacy duplicate display names must get the same suffixes when exporting.
+        claim.expenses[1].invoices[0].name = stem + ".pdf"
+        let archive = temporary.appendingPathComponent("重复名称.zip")
+        try InvoiceArchiveExporter.export(claim: claim, attachmentRoot: root.appendingPathComponent("Attachments"), to: archive)
+        let unpacked = temporary.appendingPathComponent("unpacked")
+        try run("/usr/bin/ditto", ["-x", "-k", archive.path, unpacked.path])
+        let folder = unpacked.appendingPathComponent(claim.title)
+        let files = try FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)
+        expectEqual(Set(files.map(\.lastPathComponent)), Set([".pdf", "_1.pdf", "_2.pdf", "_3.pdf", "_4.pdf", "_5.pdf"].map { stem + $0 }))
+        for file in files { expectEqual(try Data(contentsOf: file), originals) }
+    }
+
+    @MainActor func testItinerariesAreExcludedAndArchivesRetainOriginals() throws {
+        let store = ClaimStore(root: temporary.appendingPathComponent("db"))
+        var claim = Claim.make(.trip)
+        claim.setTravelerNames(["张三"])
+        claim.dates = ["2026-10-23", "2026-10-24"]
+        claim.expenses = [Expense(kind: .taxi, unitPrice: 10000, claimant: "张三")]
+        let id = claim.expenses[0].id
+        let invoice = temporary.appendingPathComponent("发票.pdf")
+        try makePDF(at: invoice, pages: 1, number: "12345678901234567890")
+        let invoiceDocument = PDFDocument(url: invoice)!
+        let rendered = invoiceDocument.page(at: 0)!.thumbnail(of: NSSize(width: 1684, height: 1190), for: .mediaBox)
+        let scanned = PDFDocument()
+        scanned.insert(PDFPage(image: rendered)!, at: 0)
+        expectEqual(AttachmentNaming.number(in: scanned, source: temporary.appendingPathComponent("扫描.pdf"), role: .invoice), "12345678901234567890")
+        let itinerary = temporary.appendingPathComponent("行程单.pdf")
+        try makePDF(at: itinerary, pages: 2)
+        let naming = AttachmentNaming()
+        claim = try store.importFiles([invoice, invoice], into: claim, expenseID: id, naming: naming)
+        expectEqual(claim.expenses[0].invoices.map(\.name), ["张三12345678901234567890.pdf", "张三12345678901234567890_1.pdf"])
+        expectEqual(claim.expenses[0].invoices[0].number, "12345678901234567890")
+        expectFalse(claim.expenses[0].invoices[0].storedName == claim.expenses[0].invoices[1].storedName)
+        expectEqual(store.url(for: claim.expenses[0].invoices[0]).lastPathComponent, "张三12345678901234567890.pdf")
+        claim.expenses[0].invoices[0].amount = 8000
+        claim.expenses[0].invoices[1].amount = 1000
+        let before = claim
+        claim = try store.importFiles([itinerary], into: claim, expenseID: id, role: .itinerary, naming: naming)
+        let image = temporary.appendingPathComponent("行程截图.png")
+        try makeCover(at: image)
+        claim = try store.importFiles([image], into: claim, expenseID: id, role: .itinerary, naming: naming)
+        claim.expenses[0].itineraries?[0].amount = 9999999
+        expectEqual(claim.total, before.total)
+        expectEqual(claim.invoiceCount, before.invoiceCount)
+        expectEqual(claim.invoiceTotal, before.invoiceTotal)
+        expectEqual(claim.difference, before.difference)
+        expectEqual(claim.expenseGroups[0].invoiceCount, 2)
+        expectEqual(claim.personBreakdowns[0].invoiceTotal, 9000)
+        expectEqual(claim.personBreakdowns[0].invoiceCount, 2)
+        expectEqual(claim.attachments.count, 4)
+        expectTrue(store.save(claim))
+        let loaded = ClaimStore(root: store.root).claims[0]
+        expectEqual(loaded.expenses, claim.expenses)
+        expectEqual(loaded.travelerNames, claim.travelerNames)
+        let legacy = Claim.make(.trip)
+        let legacyRoundTrip = try JSONDecoder().decode(Claim.self, from: JSONEncoder().encode(legacy))
+        expectNil(legacyRoundTrip.expenses[0].itineraries)
+        let archive = temporary.appendingPathComponent("发票汇总.zip")
+        try InvoiceArchiveExporter.export(claim: claim, attachmentRoot: store.root.appendingPathComponent("Attachments"), to: archive)
+        let unpacked = temporary.appendingPathComponent("unpacked")
+        try run("/usr/bin/ditto", ["-x", "-k", archive.path, unpacked.path])
+        let base = unpacked.appendingPathComponent(claim.title)
+        let files = try FileManager.default.contentsOfDirectory(at: base, includingPropertiesForKeys: nil)
+        expectEqual(files.count, 4)
+        for attachment in claim.expenses.flatMap(\.attachments) {
+            expectEqual(try Data(contentsOf: base.appendingPathComponent(attachment.name)), try Data(contentsOf: store.url(for: attachment)))
+        }
+        let document = temporary.appendingPathComponent("行程单打印.docx")
+        try WordExporter.export(claims: [claim], attachmentRoot: store.root.appendingPathComponent("Attachments"), to: document)
+        let word = temporary.appendingPathComponent("word")
+        try run("/usr/bin/ditto", ["-x", "-k", document.path, word.path])
+        let xml = try String(contentsOf: word.appendingPathComponent("word/document.xml"), encoding: .utf8)
+        for attachment in claim.expenses[0].itineraries ?? [] { expectTrue(xml.contains("行程单 · " + attachment.name)) }
+        expectTrue(xml.contains("发票：2 份"))
+        if let path = ProcessInfo.processInfo.environment["REIMBUR_QA_DIR"] {
+            let qa = URL(fileURLWithPath: path)
+            try FileManager.default.createDirectory(at: qa, withIntermediateDirectories: true)
+            try Data(contentsOf: document).write(to: qa.appendingPathComponent("itinerary-print.docx"))
+        }
+        let retained = claim.expenses[0].invoices[0]
+        let removed = claim.expenses[0].itineraries![0]
+        claim = store.removeAttachment(removed, from: claim, expenseID: id)!
+        expectEqual(claim.invoiceCount, 2)
+        expectEqual(claim.expenses[0].itineraries?.count, 1)
+        expectFalse(FileManager.default.fileExists(atPath: store.url(for: removed).path))
+        expectTrue(FileManager.default.fileExists(atPath: store.url(for: retained).path))
+        let originalArchive = try Data(contentsOf: archive)
+        try FileManager.default.removeItem(at: store.url(for: retained))
+        expectThrowsError(try InvoiceArchiveExporter.export(claim: claim, attachmentRoot: store.root.appendingPathComponent("Attachments"), to: archive))
+        expectEqual(try Data(contentsOf: archive), originalArchive)
+        expectTrue(store.delete(claim))
+        expectFalse(FileManager.default.fileExists(atPath: store.url(for: claim.expenses[0].itineraries![0]).path))
+    }
+
+    @MainActor func testUpdatedSettingsAndTaxiScreenshots() throws {
+        let store = ClaimStore(root: temporary.appendingPathComponent("db"))
+        let qa = ProcessInfo.processInfo.environment["REIMBUR_QA_DIR"].map { URL(fileURLWithPath: $0) } ?? temporary!
+        try captureView(WorkspaceView().environmentObject(store).onAppear { store.showSettings = true }, width: 1440, height: 1100,
+                        to: qa.appendingPathComponent("settings.png"))
+        var claim = Claim.make(.trip)
+        claim.setTravelerNames(["张三"])
+        claim.expenses = [Expense(kind: .taxi, unitPrice: 6000, claimant: "张三")]
+        let pdf = temporary.appendingPathComponent("行程单.pdf")
+        try makePDF(at: pdf, pages: 1)
+        claim = try store.importFiles([pdf], into: claim, expenseID: claim.expenses[0].id, role: .itinerary, naming: AttachmentNaming())
+        try captureView(ClaimEditor(claim: claim).environmentObject(store).background(Palette.canvas).tint(Palette.accent), width: 1150, height: 1400,
+                        to: qa.appendingPathComponent("taxi-itinerary.png")) { _, host in
+            @MainActor func scrollView(_ view: NSView) -> NSScrollView? {
+                if let scroll = view as? NSScrollView { return scroll }
+                return view.subviews.lazy.compactMap { scrollView($0) }.first
+            }
+            if let scroll = scrollView(host), let document = scroll.documentView {
+                scroll.contentView.scroll(to: NSPoint(x: 0, y: max(0, document.bounds.height - scroll.contentView.bounds.height)))
+                scroll.reflectScrolledClipView(scroll.contentView)
+                pumpNativeEvents()
+            } else { fail("Missing expense scroll view") }
+        }
     }
 
     @MainActor func testBatchDeleteAndRenamePreserveOtherRecords() throws {
@@ -925,7 +1553,16 @@ final class ReimburChecks {
         return claim
     }
 
-    private func makePDF(at url: URL, pages: Int) throws {
+    private func run(_ executable: String, _ arguments: [String]) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        process.standardOutput = Pipe(); process.standardError = Pipe()
+        try process.run(); process.waitUntilExit()
+        guard process.terminationStatus == 0 else { throw ReimburError("命令执行失败：\(executable)") }
+    }
+
+    private func makePDF(at url: URL, pages: Int, number: String? = nil, amount: String? = "553.00") throws {
         var bounds = CGRect(x: 0, y: 0, width: 842, height: 595)
         let context = CGContext(url as CFURL, mediaBox: &bounds, nil)!
         for page in 1...pages {
@@ -936,9 +1573,10 @@ final class ReimburChecks {
             NSGraphicsContext.saveGraphicsState()
             NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: false)
             let style: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 26), .foregroundColor: NSColor.black]
+            if let number { "发票号码：\(number)".draw(at: NSPoint(x: 80, y: 430), withAttributes: style) }
             "电子发票 测试样本".draw(at: NSPoint(x: 280, y: 470), withAttributes: style)
             "上海虹桥 → 杭州东".draw(at: NSPoint(x: 80, y: 350), withAttributes: style)
-            "价税合计 ¥553.00    第 \(page) 页".draw(at: NSPoint(x: 80, y: 200), withAttributes: style)
+            if let amount { "价税合计 ¥\(amount)    第 \(page) 页".draw(at: NSPoint(x: 80, y: 200), withAttributes: style) }
             "仅用于软件导出功能测试".draw(at: NSPoint(x: 80, y: 90), withAttributes: [.font: NSFont.systemFont(ofSize: 16)])
             NSGraphicsContext.restoreGraphicsState()
             context.endPDFPage()
@@ -1087,9 +1725,24 @@ private func expectNoThrow<T>(_ action: @autoclosure () throws -> T, file: Stati
         NSApplication.shared.activate(ignoringOtherApps: true)
         let checks = ReimburChecks()
         let tests: [(String, () throws -> Void)] = [
+            ("Daily reimbursements keep invoice totals independent", checks.testDailyReimbursementsKeepInvoiceTotalsIndependent),
+            ("Scanned rail ticket recognizes route and amount", checks.testScannedRailTicketRecognizesRouteAndAmount),
+            ("Invoice totals, rail routes and direct hotel prices", checks.testInvoiceTotalsRoutesAndDirectHotelPrices),
+            ("Attachment renaming persists and files remain usable", checks.testAttachmentRenamePersistsAndKeepsFilesUsable),
+            ("Imported attachments preview and automatic amounts", checks.testImportedAttachmentPreviewAndAutomaticAmounts),
+            ("Updated defaults layout", checks.testUpdatedDefaultsLayout),
             ("Different personal dates use longest duration and colored statistics", checks.testDifferentPersonalDatesUseLongestDuration),
             ("Gallery navigation, copy, download and interactive canvas", checks.testGalleryNavigationCopyDownloadAndCanvas),
             ("Native calendar cell corners and sweep", checks.testCalendarCellCornersAndSweep),
+            ("Traveler rename retains expenses and persists", checks.testTravelerRenamePreservesExpenses),
+            ("Native traveler double-click rename", checks.testNativeTravelerDoubleClickRename),
+            ("Dashboard sector hover hit testing", checks.testDashboardSectorHoverHitTesting),
+            ("Native dashboard hover", checks.testNativeDashboardHover),
+            ("Tooltip avoids selected marks and follows cursor", checks.testTooltipAvoidsMarksAndFollowsCursor),
+            ("Default people and configurable attachment naming", checks.testDefaultPeopleAndAttachmentNaming),
+            ("Duplicate attachment names receive numbered suffixes", checks.testDuplicateAttachmentNamesReceiveNumberedSuffixes),
+            ("Itineraries excluded from totals and complete archives", checks.testItinerariesAreExcludedAndArchivesRetainOriginals),
+            ("Updated settings and taxi screenshots", checks.testUpdatedSettingsAndTaxiScreenshots),
             ("Two-day hotel means one night with independent stay override", checks.testTwoDayHotelUsesOneNightAndExplicitStayDatesOverride),
             ("Named expenses and per-person subsidies reconcile", checks.testNamedExpensesAndSubsidiesReconcileWithoutDoubleCounting),
             ("Legacy people migration retains invoices and stable row IDs", checks.testLegacyPeopleMigrationPreservesInvoicesAndStableIDs),

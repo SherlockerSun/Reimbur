@@ -4,14 +4,13 @@ import AppKit
 struct ExpenseDefaults: Equatable {
     var subsidy: Int64 = 0
     var meal: Int64 = 0
-    var allowance: Int64 = 0
-    var hotel: Int64 = 0
+    var travelerNames: [String] = []
     static func saved(in defaults: UserDefaults = .standard) -> Self {
         func amount(_ key: String) -> Int64 { max(0, min(Money.maximumCents, Int64(defaults.integer(forKey: key)))) }
-        return Self(subsidy: amount("defaultSubsidy"), meal: amount("defaultMeal"), allowance: amount("defaultAllowance"), hotel: amount("defaultHotel"))
+        return Self(subsidy: amount("defaultSubsidy"), meal: amount("defaultMeal"), travelerNames: AppPreferences.travelerNames(in: defaults))
     }
     func price(for kind: ExpenseKind) -> Int64 {
-        switch kind { case .subsidy: return subsidy; case .meal: return meal; case .allowance: return allowance; case .hotel: return hotel; default: return 0 }
+        switch kind { case .subsidy: return subsidy; case .meal: return meal; default: return 0 }
     }
 }
 
@@ -20,9 +19,11 @@ struct SettingsView: View {
     @AppStorage("startupPage") private var startupPage = "home"
     @AppStorage("defaultSubsidy") private var subsidy = 0
     @AppStorage("defaultMeal") private var meal = 0
-    @AppStorage("defaultAllowance") private var allowance = 0
-    @AppStorage("defaultHotel") private var hotel = 0
     @AppStorage("packLandscapeInvoices") private var packInvoices = true
+    @AppStorage("sidebarCaption") private var sidebarCaption = AppPreferences.defaultCaption
+    @AppStorage("defaultTravelerNames") private var travelerNames = "[]"
+    @AppStorage("invoiceNameFormat") private var invoiceFormat = AttachmentNaming.defaultFormat
+    @AppStorage("itineraryNameFormat") private var itineraryFormat = AttachmentNaming.defaultFormat
     @State private var pathCopied = false
     private var version: String { Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "开发版" }
     var body: some View {
@@ -33,7 +34,7 @@ struct SettingsView: View {
                     Text("偏好修改自动保存到这台 Mac。").font(.system(size: 12)).foregroundStyle(Palette.muted)
                 }
                 Card {
-                    SectionLabel(title: "通用", subtitle: "选择软件启动时显示的页面")
+                    SectionLabel(title: "通用", subtitle: "启动页面与侧边栏显示内容")
                     HStack {
                         Text("启动页面").font(.system(size: 13)); Spacer()
                         Picker("启动页面", selection: $startupPage) {
@@ -42,16 +43,36 @@ struct SettingsView: View {
                     }
                 }
                 Card {
-                    SectionLabel(title: "常用费用单价", subtitle: "单位：元；仅用于新建记录或添加费用，已有费用保持当前金额")
-                    HStack(spacing: 24) {
-                        price("出差补助 / 人天", value: $subsidy)
-                        price("餐补 / 天", value: $meal)
-                        price("补助 / 天", value: $allowance)
-                        price("住宿 / 间晚", value: $hotel)
+                    SectionLabel(title: "界面文字", subtitle: "显示在左下角设置按钮上方，最多 \(AppPreferences.captionLimit) 字")
+                    HStack {
+                        TextField("设置按钮上方文字", text: $sidebarCaption)
+                            .onChange(of: sidebarCaption) { _, value in sidebarCaption = AppPreferences.caption(value) }
+                        Text("\(sidebarCaption.count) / \(AppPreferences.captionLimit)").font(.system(size: 11)).foregroundStyle(Palette.muted)
                     }
                 }
                 Card {
-                    SectionLabel(title: "发票导出", subtitle: "Word 按说明信息 → 报销单 → 发票排列，保留 PDF 的全部页面")
+                    SectionLabel(title: "默认值", subtitle: "用于新建记录或添加费用；已有记录保留当前设置")
+                    HStack(alignment: .top, spacing: 24) {
+                        LabeledField(title: "默认报销人") {
+                            PeopleTagInput(names: Binding(get: { AppPreferences.decodeNames(travelerNames) }, set: { travelerNames = AppPreferences.encodeNames($0) }))
+                        }.frame(maxWidth: .infinity)
+                        price("出差补助 / 人天", value: $subsidy).frame(width: 170)
+                        price("餐补 / 天", value: $meal).frame(width: 170)
+                    }
+                }
+                Card {
+                    SectionLabel(title: "附件命名", subtitle: "上传后自动命名；未识别号码时使用原文件名，重名自动添加 _1、_2 等后缀")
+                    LabeledField(title: "发票命名格式") { TextField(AttachmentNaming.defaultFormat, text: $invoiceFormat) }
+                    LabeledField(title: "行程单命名格式") { TextField(AttachmentNaming.defaultFormat, text: $itineraryFormat) }
+                    Text("可用字段：{报销人}、{发票号码}、{行程单号}、{报销名称}、{费用类型}、{原文件名}、{日期}")
+                        .font(.system(size: 11)).foregroundStyle(Palette.muted).textSelection(.enabled)
+                    Text("示例：张三12345678901234567890.pdf；格式留空时使用默认格式。")
+                        .font(.system(size: 11)).foregroundStyle(Palette.muted)
+                    Text("行程单无号码时，{发票号码} 使用同笔打车费用唯一的发票号码；无法确定号码时保留原文件名作为字段值。")
+                        .font(.system(size: 11)).foregroundStyle(Palette.muted)
+                }
+                Card {
+                    SectionLabel(title: "发票导出", subtitle: "Word 按说明信息 → 报销单 → 发票与行程单排列，保留 PDF 的全部页面")
                     Toggle("横向发票两张同页", isOn: $packInvoices).toggleStyle(.switch).controlSize(.small)
                     Text(packInvoices ? "较高或竖向的票据仍使用整页，保持打印可读性。" : "每张发票页面单独使用一页 A4 纸。")
                         .font(.system(size: 11)).foregroundStyle(Palette.muted)
@@ -64,7 +85,7 @@ struct SettingsView: View {
                     }
                 }
                 Card {
-                    SectionLabel(title: "数据与存储", subtitle: "SQLite 本地数据库；发票与报销单保留独立副本")
+                    SectionLabel(title: "数据与存储", subtitle: "SQLite 本地数据库；发票、行程单与报销单保留独立副本")
                     LabeledField(title: "数据存储路径") {
                         Text(store.root.path).font(.system(size: 12, design: .monospaced)).textSelection(.enabled)
                     }
@@ -83,7 +104,7 @@ struct SettingsView: View {
                 Card {
                     SectionLabel(title: "关于 Reimbur · 轻记报销", subtitle: "版本 \(version) · 原生 macOS 软件")
                     Text("支持 macOS 14 及以上 · SwiftUI / SQLite / PDFKit").font(.system(size: 12))
-                    Text("数据仅保存在本机，修改自动保存。发票数量按上传的 PDF 文件计，票面金额由手动填写。")
+                    Text("数据仅保存在本机，修改自动保存。票面金额自动识别并支持手动修改，未识别时请补填；行程单不计入发票统计。")
                         .font(.system(size: 11)).foregroundStyle(Palette.muted)
                 }
             }.frame(maxWidth: 920).frame(maxWidth: .infinity, alignment: .leading).padding(32).padding(.top, 32)
@@ -92,6 +113,9 @@ struct SettingsView: View {
     private func price(_ title: String, value: Binding<Int>) -> some View {
         LabeledField(title: title) {
             AmountField(cents: Binding(get: { Int64(value.wrappedValue) }, set: { value.wrappedValue = Int($0) }))
-        }.frame(maxWidth: .infinity)
+                .textFieldStyle(.plain).padding(.horizontal, 10).frame(height: 38)
+                .background(.white, in: RoundedRectangle(cornerRadius: 7))
+                .overlay(RoundedRectangle(cornerRadius: 7).stroke(Palette.ink.opacity(0.18)))
+        }
     }
 }

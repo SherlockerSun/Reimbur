@@ -2388,8 +2388,8 @@ final class ReimburChecks {
             "行程单 第 \(page + 1) 页".draw(at: NSPoint(x: 50, y: 770), withAttributes: style)
             "上海虹桥 → 公司  合计 ¥38.00".draw(at: NSPoint(x: 50, y: 640), withAttributes: style)
             if page == 1 {
-                // A low footer must prevent trimming it away, even with a large gap above it.
-                "底部说明 必须保留".draw(at: NSPoint(x: 50, y: 45), withAttributes: style)
+                // Print should favour the header and discard the lower footer.
+                "底部说明 应裁掉".draw(at: NSPoint(x: 50, y: 45), withAttributes: style)
             }
             NSGraphicsContext.restoreGraphicsState()
             context.endPDFPage()
@@ -2430,9 +2430,10 @@ final class ReimburChecks {
         func bitmap(_ number: Int) -> NSBitmapImageRep { NSBitmapImageRep(data: try! Data(contentsOf: unpacked.appendingPathComponent("word/media/image\(number).jpg")))! }
         expectTrue(bitmap(1).pixelsHigh > bitmap(1).pixelsWide) // portrait cover remains intact
         expectTrue(abs(Double(bitmap(2).pixelsHigh) / Double(bitmap(2).pixelsWide) - 595.0 / 842) < 0.01)
-        expectTrue(bitmap(5).pixelsHigh < 800) // PDF blank bottom removed
-        expectTrue(bitmap(6).pixelsHigh > 2300) // low footer retained
-        expectTrue(bitmap(7).pixelsHigh < 600) // raster itinerary also cropped
+        for number in 5...7 {
+            expectEqual(bitmap(number).pixelsWide, 2400)
+            expectEqual(bitmap(number).pixelsHigh, 1697)
+        }
         for entry in ["[Content_Types].xml", "_rels/.rels", "word/styles.xml", "word/_rels/document.xml.rels"] {
             expectNoThrow(try XMLDocument(xmlString: unzip(output, entry: entry)))
         }

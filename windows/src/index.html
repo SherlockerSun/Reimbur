@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Reimbur · 轻记报销</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="app" class="app-shell">
+    <aside id="sidebar" class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">报</div>
+        <div>
+          <strong>Reimbur</strong>
+          <span>轻记报销</span>
+        </div>
+      </div>
+
+      <nav class="primary-nav" aria-label="主导航">
+        <button class="nav-item active" data-view="home">
+          <span class="nav-icon">⌂</span><span class="nav-text">首页</span>
+        </button>
+        <div class="nav-group">
+          <div class="nav-caption">报销类型</div>
+          <button class="nav-item kind-item" data-kind="出差"><span class="nav-dot trip"></span><span class="nav-text">出差报销</span><span class="nav-count" id="count-出差">0</span></button>
+          <button class="nav-item kind-item" data-kind="餐补"><span class="nav-dot meal"></span><span class="nav-text">餐补报销</span><span class="nav-count" id="count-餐补">0</span></button>
+          <button class="nav-item kind-item" data-kind="补助"><span class="nav-dot allowance"></span><span class="nav-text">补贴报销</span><span class="nav-count" id="count-补助">0</span></button>
+        </div>
+      </nav>
+
+      <div class="record-section" id="record-section">
+        <div class="record-heading">
+          <button id="records-toggle" class="icon-button" title="折叠报销记录">⌄</button>
+          <div><strong>报销记录</strong><span id="record-summary">0 条</span></div>
+          <button id="batch-toggle" class="icon-button" title="批量删除">☐</button>
+        </div>
+        <div class="record-filters">
+          <input id="record-search" type="search" placeholder="搜索名称、人员、事由">
+          <div class="inline-filters">
+            <select id="status-filter" aria-label="状态筛选">
+              <option value="">全部状态</option><option>未报销</option><option>待审批</option><option>已归档</option>
+            </select>
+            <select id="period-filter" aria-label="时间筛选"><option value="">全部时间</option></select>
+          </div>
+        </div>
+        <div class="batch-bar hidden" id="batch-bar">
+          <label><input type="checkbox" id="select-all"> 全选</label>
+          <button class="danger-text" id="delete-checked">删除选中</button>
+        </div>
+        <div class="record-list" id="record-list"></div>
+      </div>
+
+      <div class="sidebar-footer">
+        <div class="tagline" id="tagline">轻记每一笔，安心每一天</div>
+        <button class="footer-button" id="settings-button"><span>⚙</span><span class="nav-text">设置</span></button>
+        <button class="footer-button" id="collapse-button"><span>‹</span><span class="nav-text">收起菜单栏</span></button>
+      </div>
+    </aside>
+
+    <main class="workspace">
+      <div id="main-content" class="main-content"></div>
+    </main>
+  </div>
+
+  <div id="modal-backdrop" class="modal-backdrop hidden"></div>
+  <div id="modal-root" class="modal-root hidden" role="dialog" aria-modal="true"></div>
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="core.js"></script>
+  <script src="vendor/pdf.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

@@ -17,7 +17,7 @@ enum WordExporter {
         var placements: [Int] = []
         func addImage(_ image: NSImage, title: String, itinerary: Bool = false, copies: Int = 1) throws {
             let filename = "image\(pictures.count + 1).jpg"
-            let picture = try rasterize(image, filename: filename, title: title, cropBottomWhitespace: itinerary,
+            let picture = try rasterize(image, filename: filename, title: title, itinerary: itinerary,
                                         destination: package.appendingPathComponent("word/media/\(filename)"))
             pictures.append(picture)
             placements.append(contentsOf: Array(repeating: pictures.count - 1, count: copies))
@@ -133,7 +133,7 @@ enum WordExporter {
         try Data(contentsOf: archive, options: .mappedIfSafe).write(to: destination, options: .atomic)
     }
 
-    private static func rasterize(_ image: NSImage, filename: String, title: String, cropBottomWhitespace: Bool, destination: URL) throws -> Picture {
+    private static func rasterize(_ image: NSImage, filename: String, title: String, itinerary: Bool, destination: URL) throws -> Picture {
         var rect = CGRect(origin: .zero, size: image.size)
         guard let source = image.cgImage(forProposedRect: &rect, context: nil, hints: nil) else { throw ReimburError("无法转换图片：\(title)") }
         let scale = min(1, 2600 / Double(max(source.width, source.height)))
@@ -145,18 +145,50 @@ enum WordExporter {
         context.interpolationQuality = .high
         context.draw(source, in: CGRect(x: 0, y: 0, width: width, height: height))
         guard let rendered = context.makeImage() else { throw ReimburError("无法转换打印图片。") }
-        let trimmed = cropBottomWhitespace ? trimmingBottomWhitespace(rendered) : rendered
-        guard let data = NSBitmapImageRep(cgImage: trimmed).representation(using: .jpeg, properties: [.compressionFactor: 0.92]) else { throw ReimburError("无法编码打印图片。") }
+        let printable = itinerary ? formattingItinerary(rendered) : rendered
+        guard let data = NSBitmapImageRep(cgImage: printable).representation(using: .jpeg, properties: [.compressionFactor: 0.92]) else { throw ReimburError("无法编码打印图片。") }
         try data.write(to: destination)
-        return Picture(filename: filename, width: trimmed.width, height: trimmed.height, title: title)
+        return Picture(filename: filename, width: printable.width, height: printable.height, title: title)
     }
 
-    /// Inspect the white-composited raster, not PDF text bounds: scanned receipts, logos, stamps
-    /// and raster footers must all survive. Keep a small safety margin below the last ink pixel.
-    private static func trimmingBottomWhitespace(_ image: CGImage) -> CGImage {
+    /// Itineraries are printed on the same A4 landscape canvas as a normal electronic invoice.
+    /// Keep the useful top section, discard the lower portion, and scale it up to fill that canvas.
+    private static func formattingItinerary(_ image: CGImage) -> CGImage {
+        let targetWidth = 2400
+        let targetHeight = 1697
+        let targetRatio = Double(targetWidth) / Double(targetHeight)
+        let sourceWidth = image.width, sourceHeight = image.height
+        var cropWidth = sourceWidth
+        var cropHeight = min(sourceHeight, max(1, Int((Double(sourceWidth) / targetRatio).rounded())))
+        var cropX = 0, cropY = 0
+
+        if Double(sourceWidth) / Double(sourceHeight) > targetRatio {
+            cropWidth = min(sourceWidth, max(1, Int((Double(sourceHeight) * targetRatio).rounded())))
+            cropHeight = sourceHeight
+            cropX = (sourceWidth - cropWidth) / 2
+        } else if let firstInk = firstInkRow(image) {
+            let margin = max(8, sourceHeight / 100)
+            cropY = min(max(0, firstInk - margin), max(0, sourceHeight - cropHeight))
+        }
+
+        guard let cropped = image.cropping(to: CGRect(x: cropX, y: cropY, width: cropWidth, height: cropHeight)),
+              let context = CGContext(data: nil, width: targetWidth, height: targetHeight, bitsPerComponent: 8, bytesPerRow: 0,
+                                      space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else {
+            return image
+        }
+        context.setFillColor(CGColor.white)
+        context.fill(CGRect(x: 0, y: 0, width: targetWidth, height: targetHeight))
+        context.interpolationQuality = .high
+        context.draw(cropped, in: CGRect(x: 0, y: 0, width: targetWidth, height: targetHeight))
+        return context.makeImage() ?? image
+    }
+
+    /// Scan the white-composited raster so the crop starts just above the first visible header,
+    /// including scanned receipts, logos and stamps. CGImage rows start at the visible top.
+    private static func firstInkRow(_ image: CGImage) -> Int? {
         let width = image.width, height = image.height, rowBytes = image.width * 4
         var pixels = [UInt8](repeating: 255, count: rowBytes * height)
-        let lastInkRow: Int? = pixels.withUnsafeMutableBytes { buffer in
+        return pixels.withUnsafeMutableBytes { buffer in
             guard let context = CGContext(data: buffer.baseAddress, width: width, height: height,
                                           bitsPerComponent: 8, bytesPerRow: rowBytes, space: CGColorSpaceCreateDeviceRGB(),
                                           bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue) else { return nil }
@@ -164,18 +196,14 @@ enum WordExporter {
             context.fill(CGRect(x: 0, y: 0, width: width, height: height))
             context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
             let bytes = buffer.bindMemory(to: UInt8.self)
-            for row in stride(from: height - 1, through: 0, by: -1) {
-                for column in 0..<width {
+            for row in 0..<height {
+                for column in stride(from: 0, to: width, by: 2) {
                     let offset = row * rowBytes + column * 4
                     if min(bytes[offset], bytes[offset + 1], bytes[offset + 2]) < 245 { return row }
                 }
             }
             return nil
         }
-        guard let lastInkRow else { return image }
-        let croppedHeight = min(height, lastInkRow + 1 + max(12, height / 100))
-        guard height - croppedHeight > max(24, height / 50) else { return image }
-        return image.cropping(to: CGRect(x: 0, y: 0, width: width, height: croppedHeight)) ?? image
     }
 
     private static func xml(_ text: String) -> String {

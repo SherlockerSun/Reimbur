@@ -1,0 +1,69 @@
+{
+  "name": "reimbur-windows",
+  "version": "2.0.0",
+  "description": "Reimbur 轻记报销 Windows 版",
+  "main": "electron/main.js",
+  "author": "SherlockerSun",
+  "license": "UNLICENSED",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "verify": "node scripts/verify.js",
+    "pack:win": "electron-builder --win nsis --x64"
+  },
+  "dependencies": {
+    "archiver": "6.0.2",
+    "docx": "8.5.0",
+    "pdfjs-dist": "3.11.174",
+    "sql.js": "1.10.3",
+    "xlsx": "0.18.5"
+  },
+  "devDependencies": {
+    "electron": "28.3.3",
+    "electron-builder": "24.13.3"
+  },
+  "build": {
+    "appId": "com.reimbur.windows",
+    "productName": "Reimbur",
+    "artifactName": "Reimbur-${version}-Windows-${arch}-Setup.${ext}",
+    "asar": true,
+    "asarUnpack": [
+      "node_modules/sql.js/dist/sql-wasm.wasm"
+    ],
+    "directories": {
+      "output": "../dist/windows",
+      "buildResources": "assets"
+    },
+    "files": [
+      "electron/**/*",
+      "src/**/*",
+      "package.json",
+      "node_modules/**/*"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "assets/icon.png",
+      "signAndEditExecutable": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowElevation": true,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "轻记报销",
+      "installerLanguages": [
+        "zh_CN"
+      ],
+      "displayLanguageSelector": false
+    }
+  }
+}

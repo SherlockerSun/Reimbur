@@ -1,6 +1,6 @@
 # Reimbur 轻记报销
 
-一款原生 macOS 报销管理软件，支持出差、餐补和补贴报销。使用 SwiftUI、SQLite 和 PDFKit，记录与附件保存在本机，可离线使用。
+一款支持 macOS 与 Windows 的本地报销管理软件，支持出差、餐补和补贴报销。记录与附件保存在本机，可离线使用。
 
 [下载安装包](https://github.com/SherlockerSun/Reimbur/releases/latest) · [提交问题](https://github.com/SherlockerSun/Reimbur/issues)
 
@@ -40,11 +40,17 @@
 
 ## 安装
 
+### macOS
+
 支持 **macOS 14 及以上版本**，发布安装包适用于 **Apple Silicon（M 系列芯片）**。
 
 1. 从 [GitHub Releases](https://github.com/SherlockerSun/Reimbur/releases/latest) 下载 ZIP 安装包。
 2. 解压后将 `Reimbur.app` 拖入“应用程序”文件夹。
 3. 打开应用，在左侧选择报销类型并新建记录。首次使用不预置演示数据。
+
+### Windows
+
+支持 **Windows 10/11 x64**。下载 `Reimbur-2.0.0-Windows-x64-Setup.exe` 后运行安装程序，可自行选择安装目录。Windows 版同样使用本地 SQLite 数据库，数据默认保存在 `%APPDATA%\Reimbur`。
 
 ## 主要功能
 
@@ -103,6 +109,8 @@
 
 ## 从源码运行
 
+### macOS
+
 需要 macOS 14 及以上 SDK、Swift 5.9 或以上，可使用 Xcode Command Line Tools 构建，无外部 Swift 包依赖。
 
 ```sh
@@ -123,4 +131,17 @@ REIMBUR_DATA_DIR="$PWD/output/dev-data" swift run Reimbur
 REIMBUR_CHECK_FILTER="Trip mixed batch|Trip list native" ./scripts/test.sh
 ```
 
-安装包使用本机构建签名，尚未进行 Apple Developer ID 签名和公证。软件不提供云同步或发票验真服务。
+### Windows
+
+Windows 版位于 `windows/`，使用 Electron、SQLite（WASM）和 PDF.js，无需安装 Microsoft Office 即可导出 XLSX 与 DOCX。
+
+```bat
+cd windows
+npm install
+npm run verify
+npm run pack:win
+```
+
+安装包输出到 `dist/windows/`。
+
+安装包使用本机构建签名，尚未进行 Apple Developer ID 或 Windows 代码签名，Windows SmartScreen 可能显示未识别发布者提示。软件不提供云同步或发票验真服务。

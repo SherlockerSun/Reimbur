@@ -1564,6 +1564,8 @@ final class ReimburChecks {
         expectEqual(try document.nodes(forXPath: "//*[local-name()='c' and @r='E8']").count, 0)
         expectEqual(try document.nodes(forXPath: "//*[local-name()='c' and @r='F8']").count, 0)
         expectEqual(try document.nodes(forXPath: "//*[local-name()='autoFilter']").count, 0)
+        let sheetView = try document.nodes(forXPath: "//*[local-name()='sheetView']").first as! XMLElement
+        expectTrue((sheetView.attribute(forName: "showGridLines")?.stringValue ?? "1") != "0")
         expectNil(LedgerExporter.excelDate("2026-02-30"))
         let printFile = temporary.appendingPathComponent("打印.docx")
         try WordExporter.export(claims: [claim], attachmentRoot: store.root.appendingPathComponent("Attachments"), to: printFile)
@@ -1628,6 +1630,8 @@ final class ReimburChecks {
         expectEqual(try cell("H2").stringValue, "宁波项目现场调试")
         expectEqual(try document.nodes(forXPath: "//*[local-name()='c' and @r='E5']").count, 0)
         expectEqual(try document.nodes(forXPath: "//*[local-name()='autoFilter']").count, 0)
+        let sheetView = try document.nodes(forXPath: "//*[local-name()='sheetView']").first as! XMLElement
+        expectTrue((sheetView.attribute(forName: "showGridLines")?.stringValue ?? "1") != "0")
         try captureView(ClaimEditor(claim: claim).environmentObject(store).background(Palette.canvas).tint(Palette.accent),
                         width: 1450, height: 1500, to: qa.appendingPathComponent("trip-ledger.png"))
     }

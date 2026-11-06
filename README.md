@@ -44,8 +44,8 @@
 
 支持 **macOS 14 及以上版本**，发布安装包适用于 **Apple Silicon（M 系列芯片）**。
 
-1. 从 [GitHub Releases](https://github.com/SherlockerSun/Reimbur/releases/latest) 下载 ZIP 安装包。
-2. 解压后将 `Reimbur.app` 拖入“应用程序”文件夹。
+1. 从 [GitHub Releases](https://github.com/SherlockerSun/Reimbur/releases/latest) 下载 DMG 安装包。
+2. 双击打开 DMG，将 `Reimbur.app` 拖入“应用程序”文件夹。
 3. 打开应用，在左侧选择报销类型并新建记录。首次使用不预置演示数据。
 
 ### Windows
@@ -119,7 +119,7 @@ swift run Reimbur
 
 # 构建应用
 ./scripts/build-app.sh
-open dist/Reimbur.app
+open dist/Reimbur-v2.0.0-macOS-arm64.dmg
 
 # 指定 Apple Silicon 架构
 REIMBUR_BUILD_ARCH=arm64 ./scripts/build-app.sh

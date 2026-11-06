@@ -44,8 +44,9 @@ jobs:
           set -euo pipefail
           codesign --verify --deep --strict dist/Reimbur.app
           test "$(lipo -archs dist/Reimbur.app/Contents/MacOS/Reimbur)" = arm64
-          archive="Reimbur-$RELEASE_TAG-macOS-arm64.zip"
-          ditto -c -k --sequesterRsrc --keepParent dist/Reimbur.app "dist/$archive"
+          archive="Reimbur-$RELEASE_TAG-macOS-arm64.dmg"
+          test -f "dist/$archive"
+          hdiutil verify "dist/$archive"
           cd dist
           shasum -a 256 "$archive" > SHA256SUMS.txt
       - name: Upload assets and publish release
@@ -61,6 +62,6 @@ jobs:
             --title "Reimbur $RELEASE_TAG" \
             --notes-file ".github/release-notes/$RELEASE_TAG.md" \
             --draft \
-            "dist/Reimbur-$RELEASE_TAG-macOS-arm64.zip" \
+            "dist/Reimbur-$RELEASE_TAG-macOS-arm64.dmg" \
             dist/SHA256SUMS.txt
           gh release edit "$RELEASE_TAG" --draft=false --latest

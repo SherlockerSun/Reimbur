@@ -1,6 +1,20 @@
 import SwiftUI
 import AppKit
 
+// AppKit views can draw outside their bounds by default on newer macOS versions.
+// Zoomable previews must clip before their content reaches adjacent controls.
+class PreviewCanvasView: NSView {
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        clipsToBounds = true
+    }
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        clipsToBounds = true
+    }
+    override var wantsDefaultClipping: Bool { true }
+}
+
 enum Palette {
     static let ink = Color(red: 0.12, green: 0.19, blue: 0.25)
     static let accent = Color(red: 63 / 255, green: 150 / 255, blue: 1)
@@ -399,8 +413,17 @@ struct DismissibleOverlay<Content: View>: View {
                     .background(Palette.canvas).clipShape(RoundedRectangle(cornerRadius: 16))
                     .shadow(color: .black.opacity(0.22), radius: 30, y: 12)
                     .contentShape(Rectangle()).onTapGesture {}
+                    .overlay(alignment: .topTrailing) {
+                        Button(action: close) {
+                            Image(systemName: "xmark").font(.system(size: 12, weight: .semibold))
+                                .frame(width: 28, height: 28)
+                                .background(Palette.ink.opacity(0.055), in: Circle())
+                                .contentShape(Circle())
+                        }.buttonStyle(.plain).help("关闭预览（Esc）").accessibilityLabel("关闭预览")
+                            .padding(16)
+                    }
             }.frame(maxWidth: .infinity, maxHeight: .infinity)
-        }.onExitCommand(perform: close)
+        }.ignoresSafeArea().onExitCommand(perform: close)
     }
 }
 

@@ -43,7 +43,7 @@ enum WordExporter {
                             guard let image = NSImage(contentsOf: url), image.isValid else {
                                 throw ReimburError("\(role)图片丢失或损坏：\(attachment.name)")
                             }
-                            try addImage(image, title: "\(expense.kind.rawValue) · \(role) · \(attachment.name)",
+                            try addImage(image, title: "\(expense.kind.displayName) · \(role) · \(attachment.name)",
                                          itinerary: !isInvoice, copies: copies)
                         }
                         continue
@@ -58,7 +58,7 @@ enum WordExporter {
                             guard bounds.width > 0, bounds.height > 0 else { throw ReimburError("PDF 页面尺寸无效。") }
                             let scale = min(3.5, 2600 / max(bounds.width, bounds.height))
                             let image = page.thumbnail(of: NSSize(width: bounds.width * scale, height: bounds.height * scale), for: .mediaBox)
-                            try addImage(image, title: "\(expense.kind.rawValue) · \(role) · \(attachment.name) · 第 \(index + 1)/\(pdf.pageCount) 页",
+                            try addImage(image, title: "\(expense.kind.displayName) · \(role) · \(attachment.name) · 第 \(index + 1)/\(pdf.pageCount) 页",
                                          itinerary: !isInvoice, copies: copies)
                         }
                     }

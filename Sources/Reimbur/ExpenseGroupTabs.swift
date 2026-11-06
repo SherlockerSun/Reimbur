@@ -85,7 +85,7 @@ struct ExpenseGroupTabs: View {
     private func tab(_ group: ExpenseGroup) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Image(systemName: group.kind.icon); Text(group.kind.rawValue); Spacer()
+                Image(systemName: group.kind.icon); Text(group.kind.displayName); Spacer()
                 Text("\(group.expenses.count) 笔").font(.system(size: 10)).opacity(0.7)
             }
             Text(Money.format(group.total(in: claim))).font(.system(size: 17, weight: .semibold, design: .rounded))
@@ -95,7 +95,7 @@ struct ExpenseGroupTabs: View {
             .foregroundStyle(selection == group.kind ? Palette.accent : Palette.ink)
             .background(selection == group.kind ? Palette.accent.opacity(0.08) : .white, in: RoundedRectangle(cornerRadius: 10))
             .overlay(RoundedRectangle(cornerRadius: 10).stroke(drag?.kind == group.kind ? Palette.accent : (selection == group.kind ? Palette.accent.opacity(0.5) : Palette.ink.opacity(0.08)), lineWidth: drag?.kind == group.kind ? 2 : 1))
-            .contentShape(Rectangle()).help("点击查看\(group.kind.rawValue)，拖动整个卡片左右排序")
+            .contentShape(Rectangle()).help("点击查看\(group.kind.displayName)，拖动整个卡片左右排序")
     }
 }
 

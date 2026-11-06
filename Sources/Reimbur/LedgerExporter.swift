@@ -5,7 +5,6 @@ enum LedgerExporter {
     static let headers = ["序号", "日期", "姓名", "发票号码", "金额（元）", "报销单金额", "明细", "用途"]
 
     static func export(claim: Claim, to destination: URL) throws {
-        guard claim.kind != .trip else { throw ReimburError("出差报销请使用打印文档导出。") }
         let claim = claim.withPeopleAssigned.withInvoiceLedger
         let fm = FileManager.default
         let staging = fm.temporaryDirectory.appendingPathComponent("Reimbur-ledger-\(UUID())")
@@ -22,7 +21,7 @@ enum LedgerExporter {
         }
         let columns = ["A", "B", "C", "D", "E", "F", "G", "H"]
         var data = "<row r=\"1\" ht=\"26\" customHeight=\"1\">" + zip(columns, headers).map { text($0 + "1", $1, style: 1) }.joined() + "</row>"
-        for (index, row) in claim.invoiceLedgerRows.enumerated() {
+        for (index, row) in claim.invoiceLedgerRowsInTypeOrder.enumerated() {
             let r = index + 2
             let lineCount = max(1, Int(ceil(Double(row.entry.detail.count) / 20)), Int(ceil(Double(row.purpose.count) / 16)))
             data += "<row r=\"\(r)\" ht=\"\(min(300, max(24, lineCount * 15 + 6)))\" customHeight=\"1\">"
@@ -37,29 +36,21 @@ enum LedgerExporter {
             data += text("H\(r)", row.purpose)
             data += "</row>"
         }
-        let last = claim.invoiceLedgerRows.count + 1, total = last + 1
-        data += "<row r=\"\(total)\" ht=\"26\" customHeight=\"1\">" + columns.map { column -> String in
-            if column == "E" || column == "F" {
-                let amount = column == "E" ? claim.invoiceTotal : claim.ledgerReimbursementTotal
-                let formula = last >= 2 ? "SUM(\(column)2:\(column)\(last))" : "0"
-                return "<c r=\"\(column)\(total)\" s=\"7\"><f>\(formula)</f><v>\(Money.input(amount))</v></c>"
-            }
-            return text(column + String(total), column == "A" ? "合计" : "", style: 6)
-        }.joined() + "</row>"
+        let last = claim.invoiceLedgerRowsInTypeOrder.count + 1
         let widths = [7, 14, 13, 27, 15, 15, 26, 22]
         let sheet = """
         <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-        <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetPr><pageSetUpPr fitToPage="1"/></sheetPr><dimension ref="A1:H\(total)"/>
+        <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetPr><pageSetUpPr fitToPage="1"/></sheetPr><dimension ref="A1:H\(last)"/>
         <sheetViews><sheetView workbookViewId="0" showGridLines="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>
         <sheetFormatPr defaultRowHeight="24"/><cols>\(widths.enumerated().map { "<col min=\"\($0.offset + 1)\" max=\"\($0.offset + 1)\" width=\"\($0.element)\" customWidth=\"1\"/>" }.joined())</cols>
-        <sheetData>\(data)</sheetData>\(last >= 2 ? "<autoFilter ref=\"A1:H\(last)\"/>" : "")
+        <sheetData>\(data)</sheetData>
         <printOptions horizontalCentered="1"/><pageMargins left="0.25" right="0.25" top="0.4" bottom="0.4" header="0.2" footer="0.2"/>
         <pageSetup paperSize="9" orientation="landscape" fitToWidth="1" fitToHeight="0"/></worksheet>
         """
         let files = [
             "[Content_Types].xml": "<?xml version=\"1.0\"?><Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"xml\" ContentType=\"application/xml\"/><Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml\"/><Override PartName=\"/xl/worksheets/sheet1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/><Override PartName=\"/xl/styles.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml\"/></Types>",
             "_rels/.rels": "<?xml version=\"1.0\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"xl/workbook.xml\"/></Relationships>",
-            "xl/workbook.xml": "<?xml version=\"1.0\"?><workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><bookViews><workbookView/></bookViews><sheets><sheet name=\"报销清单\" sheetId=\"1\" r:id=\"rId1\"/></sheets><definedNames><definedName name=\"_xlnm.Print_Area\" localSheetId=\"0\">'报销清单'!$A$1:$H$\(total)</definedName><definedName name=\"_xlnm.Print_Titles\" localSheetId=\"0\">'报销清单'!$1:$1</definedName></definedNames><calcPr calcId=\"191029\" fullCalcOnLoad=\"1\"/></workbook>",
+            "xl/workbook.xml": "<?xml version=\"1.0\"?><workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><bookViews><workbookView/></bookViews><sheets><sheet name=\"报销清单\" sheetId=\"1\" r:id=\"rId1\"/></sheets><definedNames><definedName name=\"_xlnm.Print_Area\" localSheetId=\"0\">'报销清单'!$A$1:$H$\(last)</definedName><definedName name=\"_xlnm.Print_Titles\" localSheetId=\"0\">'报销清单'!$1:$1</definedName></definedNames><calcPr calcId=\"191029\" fullCalcOnLoad=\"1\"/></workbook>",
             "xl/_rels/workbook.xml.rels": "<?xml version=\"1.0\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet1.xml\"/><Relationship Id=\"rId2\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles\" Target=\"styles.xml\"/></Relationships>",
             "xl/worksheets/sheet1.xml": sheet,
             "xl/styles.xml": styles
@@ -93,6 +84,6 @@ enum LedgerExporter {
         func style(_ format: Int = 0, bold: Bool = false, fill: Bool = false, center: Bool = false, right: Bool = false) -> String {
             "<xf numFmtId=\"\(format)\" fontId=\"\(bold ? 1 : 0)\" fillId=\"\(fill ? 2 : 0)\" borderId=\"1\" xfId=\"0\" applyNumberFormat=\"1\" applyAlignment=\"1\" applyBorder=\"1\" applyFont=\"1\" applyFill=\"1\"><alignment vertical=\"center\" horizontal=\"\(center ? "center" : right ? "right" : "left")\" wrapText=\"1\"/></xf>"
         }
-        return "<?xml version=\"1.0\"?><styleSheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><numFmts count=\"2\"><numFmt numFmtId=\"164\" formatCode=\"yyyy-mm-dd\"/><numFmt numFmtId=\"165\" formatCode=\"#,##0.00\"/></numFmts>\(fonts)\(fills)\(borders)<cellStyleXfs count=\"1\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\"/></cellStyleXfs><cellXfs count=\"8\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\"/>\(style(bold: true, fill: true, center: true))\(style())\(style(165, right: true))\(style(164))\(style(49))\(style(bold: true, fill: true))\(style(165, bold: true, fill: true, right: true))</cellXfs><cellStyles count=\"1\"><cellStyle name=\"Normal\" xfId=\"0\" builtinId=\"0\"/></cellStyles></styleSheet>"
+        return "<?xml version=\"1.0\"?><styleSheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><numFmts count=\"2\"><numFmt numFmtId=\"164\" formatCode=\"yyyy-mm-dd\"/><numFmt numFmtId=\"165\" formatCode=\"#,##0.00\"/></numFmts>\(fonts)\(fills)\(borders)<cellStyleXfs count=\"1\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\"/></cellStyleXfs><cellXfs count=\"8\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\"/>\(style(bold: true, center: true))\(style())\(style(165, right: true))\(style(164))\(style(49))\(style(bold: true))\(style(165, bold: true, fill: true, right: true))</cellXfs><cellStyles count=\"1\"><cellStyle name=\"Normal\" xfId=\"0\" builtinId=\"0\"/></cellStyles></styleSheet>"
     }
 }

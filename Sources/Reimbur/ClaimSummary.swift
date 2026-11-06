@@ -68,7 +68,7 @@ enum ClaimSummary {
     }
     private static func renderSection(_ claim: Claim, person: PersonBreakdown? = nil) -> String {
         if claim.kind != .trip, claim.invoiceLedgerEntries != nil { return renderLedger(claim) }
-        var lines = [claim.title, "类型：\(claim.kind.rawValue)报销"]
+        var lines = [claim.title, "类型：\(claim.kind.displayName)报销"]
         if let person {
             if claim.kind == .trip { lines.append("出差人：\(person.name)") }
         } else if claim.kind == .trip {
@@ -81,12 +81,12 @@ enum ClaimSummary {
         let days = person?.days(in: claim) ?? claim.reimbursementDayCount
         lines.append("日期：\(ranges(dates))（\(days) 天）")
         for (index, group) in claim.expenseGroups.enumerated() {
-            lines += ["", "\(index + 1)、\(group.kind.rawValue)"]
+            lines += ["", "\(index + 1)、\(group.kind.displayName)"]
             if group.kind.hasRoute {
                 var routes: [String] = []
                 var amounts: [String: [Int64]] = [:]
                 for expense in group.expenses {
-                    let route = "\(expense.origin.isEmpty ? "未填起点" : expense.origin)-\(expense.destination.isEmpty ? "未填终点" : expense.destination)"
+                    let route = "\(expense.originCity.isEmpty ? "未填起点" : expense.originCity)-\(expense.destinationCity.isEmpty ? "未填终点" : expense.destinationCity)"
                     if amounts[route] == nil { routes.append(route) }
                     amounts[route, default: []].append(expense.total(in: claim))
                 }
@@ -112,7 +112,7 @@ enum ClaimSummary {
         return lines.joined(separator: "\n")
     }
     private static func renderLedger(_ claim: Claim) -> String {
-        var lines = [claim.title, "类型：\(claim.kind.rawValue)报销", "报销人：\((claim.travelerNames ?? []).joined(separator: "、"))", "用途：\(claim.ledgerPurpose)"]
+        var lines = [claim.title, "类型：\(claim.kind.displayName)报销", "报销人：\((claim.travelerNames ?? []).joined(separator: "、"))", "用途：\(claim.ledgerPurpose)"]
         if claim.kind == .meal {
             lines.append("日期：\(ranges(claim.dates))（\(claim.reimbursementDayCount) 天）")
             for expense in claim.expenses { lines.append("报销计算：\(expense.formula(in: claim)) = \(Money.input(expense.total(in: claim)))") }
@@ -120,7 +120,7 @@ enum ClaimSummary {
             lines.append("报销总额（单独填写）：\(Money.input(claim.total))")
         }
         lines += ["", "报销清单"]
-        for (index, row) in claim.invoiceLedgerRows.enumerated() {
+        for (index, row) in claim.invoiceLedgerRowsInTypeOrder.enumerated() {
             lines += ["\(index + 1)、\(row.entry.date) · \(row.entry.claimant ?? "未填写")",
                       "    发票号码：\(row.invoice?.number ?? "未填写")",
                       "    发票金额：\(Money.input(row.invoice?.amount ?? 0))；报销单金额：\(Money.input(row.entry.reimbursementAmount))"]

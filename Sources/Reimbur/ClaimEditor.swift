@@ -6,8 +6,6 @@ struct ClaimEditor: View {
     @State private var draft: Claim
     @State private var selectedKind: ExpenseKind?
     @State private var saved = true
-    @State private var showingPeople = false
-    @State private var previewPersonID: String?
     @State private var deletingExpense: UUID?
     @State private var deletingCover: Attachment?
     private let source: Claim
@@ -36,11 +34,11 @@ struct ClaimEditor: View {
                     }
                     if draft.kind == .trip {
                         peopleSection
+                        tripLedgerSection
                         coverSection
                         expenseSection
                     } else {
-                        InvoiceLedgerView(claim: $draft, export: { store.exportLedger(draft) })
-                        ledgerAttachments
+                        InvoiceLedgerView(claim: $draft, export: { store.exportLedger(draft) }, files: fileActions, importInvoices: importLedgerInvoices)
                     }
                     HStack {
                         Image(systemName: "lock.shield").foregroundStyle(Palette.accent)
@@ -52,13 +50,6 @@ struct ClaimEditor: View {
         .onChange(of: draft) { _, new in saved = store.save(new) }
         .onChange(of: source.title) { _, new in if draft.title != new { draft.title = new } }
         .onChange(of: source.status) { _, new in if draft.status != new { draft.status = new } }
-        .overlay {
-            if showingPeople {
-                DismissibleOverlay(close: { showingPeople = false }) {
-                    ClaimTextPreview(claim: draft, initialPersonID: previewPersonID, close: { showingPeople = false })
-                }
-            }
-        }
         .confirmationDialog("删除这项费用及其发票附件？", isPresented: Binding(get: { deletingExpense != nil }, set: { if !$0 { deletingExpense = nil } }), titleVisibility: .visible, presenting: deletingExpense) { id in
             Button("删除费用", role: .destructive) { removeExpense(id) }
             Button("取消", role: .cancel) { deletingExpense = nil }
@@ -76,7 +67,7 @@ struct ClaimEditor: View {
         HStack(spacing: 14) {
             VStack(alignment: .leading, spacing: 7) {
                 HStack(spacing: 7) {
-                    Text("\(draft.kind.rawValue)报销").font(.system(size: 10, weight: .semibold)).foregroundStyle(Palette.accent)
+                    Text("\(draft.kind.displayName)报销").font(.system(size: 10, weight: .semibold)).foregroundStyle(Palette.accent)
                     Text("/").foregroundStyle(Palette.muted)
                     Text(draft.kind == .trip ? "费用工作台" : "报销清单").font(.system(size: 10)).foregroundStyle(Palette.muted)
                 }
@@ -87,10 +78,10 @@ struct ClaimEditor: View {
             Spacer(minLength: 12)
             if saved { Label("已自动保存", systemImage: "checkmark.circle.fill").font(.system(size: 10)).foregroundStyle(Palette.muted) }
             else { Button("重试保存") { saved = store.save(draft) }.foregroundStyle(.red) }
-            Button { store.exportInvoices(draft) } label: { Label("导出发票", systemImage: "archivebox").padding(.vertical, 4) }
+            Button { store.exportInvoices(draft) } label: { Label("导出发票", systemImage: "folder").padding(.vertical, 4) }
                 .buttonStyle(ExportButtonStyle(color: .purple))
                 .disabled(!saved || store.exporting || draft.expenses.flatMap(\.attachments).isEmpty)
-            Button { store.export([draft]) } label: { Label("导出打印文档", systemImage: "square.and.arrow.up").padding(.vertical, 4) }
+            Button { store.export([draft]) } label: { Label("打印发票", systemImage: "printer").padding(.vertical, 4) }
                 .buttonStyle(ExportButtonStyle(color: Palette.accent)).disabled(!saved || store.exporting)
         }.padding(.horizontal, 26).padding(.top, 42).padding(.bottom, 23)
     }
@@ -105,6 +96,16 @@ struct ClaimEditor: View {
                 PeopleTagInput(names: Binding(get: { draft.travelerNames ?? [] }, set: { draft.setTravelerNames($0) }),
                                rename: { draft.renameTraveler(from: $0, to: $1) })
             }
+            HStack(alignment: .top, spacing: 16) {
+                LabeledField(title: "部门") {
+                    TextField("填写部门", text: Binding(get: { draft.department ?? "" }, set: { draft.department = $0 })).accessibilityLabel("部门")
+                }.frame(maxWidth: draft.kind == .trip ? 240 : .infinity)
+                if draft.kind == .trip {
+                    LabeledField(title: "出差事由") {
+                        TextField("填写出差事由", text: Binding(get: { draft.tripPurpose ?? "" }, set: { draft.tripPurpose = $0 })).accessibilityLabel("出差事由")
+                    }.frame(maxWidth: .infinity)
+                }
+            }
             if draft.travelerNames == nil {
                 Text("历史人数：\(draft.travelers) 人。填写姓名后，人数将按标签数量自动计算。")
                     .font(.system(size: 10)).foregroundStyle(Palette.muted)
@@ -113,7 +114,7 @@ struct ClaimEditor: View {
                 HStack(spacing: 12) {
                     Text("报销总额（元）").font(.system(size: 11, weight: .medium)).foregroundStyle(Palette.muted)
                     AmountField(cents: Binding(get: { draft.total }, set: { draft.allowanceAmount = $0 }))
-                        .frame(width: 160).accessibilityLabel("补助报销总额")
+                        .frame(width: 160).accessibilityLabel("补贴报销总额")
                     Text("单独填写，与清单金额独立").font(.system(size: 11)).foregroundStyle(Palette.muted)
                     Spacer(minLength: 0)
                 }
@@ -150,7 +151,7 @@ struct ClaimEditor: View {
                     }
                 }
             }
-            LabeledField(title: "备注 / 报销事由") {
+            LabeledField(title: draft.kind == .trip ? "备注" : "备注 / 报销事由") {
                 TextEditor(text: $draft.note).font(.system(size: 12)).scrollContentBackground(.hidden)
                     .padding(7).frame(minHeight: draft.kind == .meal ? 64 : 72, idealHeight: draft.kind == .meal ? 64 : 72, maxHeight: .infinity)
                     .background(.white, in: RoundedRectangle(cornerRadius: 7))
@@ -171,12 +172,12 @@ struct ClaimEditor: View {
             HStack {
                 SectionLabel(title: "个人明细", subtitle: "每笔费用归属一位报销人；个人合计与整体总额同步")
                 Spacer()
-                Button("查看完整清单") { previewPersonID = nil; showingPeople = true }
+                Button("查看完整清单") { store.previewSummary(draft) }
             }
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 10) {
                     ForEach(draft.personBreakdowns) { person in
-                        Button { previewPersonID = person.id; showingPeople = true } label: {
+                        Button { store.previewSummary(draft, personID: person.id) } label: {
                             VStack(alignment: .leading, spacing: 7) {
                                 Label(person.name, systemImage: "person.crop.circle").font(.system(size: 12, weight: .medium))
                                 Text(Money.format(person.total(in: draft))).font(.system(size: 17, weight: .semibold, design: .rounded))
@@ -193,17 +194,17 @@ struct ClaimEditor: View {
     private var expenseSection: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
-                SectionLabel(title: "费用明细", subtitle: "\(draft.expenseGroups.count) 类 · \(draft.expenses.count) 笔费用 · 同类型合并汇总")
+                SectionLabel(title: "费用明细", subtitle: "费用、发票与金额在同一清单核对和管理")
                 Spacer()
                 Menu {
                     if draft.kind == .trip {
                         Button("补助", systemImage: "banknote") { addExpense(.subsidy) }
                         Menu("交通") {
-                            ForEach([ExpenseKind.train, .flight, .taxi]) { kind in Button(kind.rawValue, systemImage: kind.icon) { addExpense(kind) } }
+                            ForEach([ExpenseKind.train, .flight, .taxi]) { kind in Button(kind.displayName, systemImage: kind.icon) { addExpense(kind) } }
                         }
                         Button("住宿", systemImage: "bed.double") { addExpense(.hotel) }
                     } else {
-                        ForEach(draft.kind.categories) { kind in Button(kind.rawValue) { addExpense(kind) } }
+                        ForEach(draft.kind.categories) { kind in Button(kind.displayName) { addExpense(kind) } }
                     }
                 } label: { Label("添加费用", systemImage: "plus") }.fixedSize()
             }
@@ -217,176 +218,47 @@ struct ClaimEditor: View {
                 if let group = draft.expenseGroups.first(where: { $0.kind == selectedKind }) {
                     HStack {
                         VStack(alignment: .leading, spacing: 5) {
-                            Text("\(group.kind.rawValue) · \(group.expenses.count) 笔").font(.system(size: 14, weight: .semibold))
+                            Text("\(group.kind.displayName) · \(group.expenses.count) 笔").font(.system(size: 14, weight: .semibold))
                             Text("合计 \(Money.format(group.total(in: draft)))" + (group.kind.acceptsInvoices || group.invoiceCount > 0 ? " · \(group.invoiceCount) 份发票 · 票面合计 \(Money.format(group.invoiceTotal))" : " · 无需发票"))
                                 .font(.system(size: 11)).foregroundStyle(Palette.muted)
                         }
                         Spacer()
                         Button { addExpense(group.kind) } label: {
-                            Label(group.kind == .subsidy && draft.travelerCount > 1 ? "再加一组补助" : "再加一笔\(group.kind.rawValue)", systemImage: "plus")
+                            Label("再加一笔", systemImage: "plus")
                         }
                     }.padding(.vertical, 4)
-                    ForEach(group.expenses) { expense in
-                        if let index = draft.expenses.firstIndex(where: { $0.id == expense.id }) {
-                            expenseForm(index, number: (group.expenses.firstIndex(where: { $0.id == expense.id }) ?? 0) + 1)
+                    Card(spacing: 12) {
+                        if group.kind.acceptsInvoices {
+                            HStack {
+                                Text("点击文件图标预览，点击名称改名").font(.system(size: 10)).foregroundStyle(Palette.muted)
+                                Spacer()
+                                Button { batchImport(group.kind) } label: {
+                                    Label("导入", systemImage: "tray.and.arrow.down")
+                                }.buttonStyle(ExportButtonStyle(color: Palette.accent))
+                            }
                         }
+                        TripExpenseListView(claim: $draft, kind: group.kind, remove: { deletingExpense = $0 }, files: fileActions)
                     }
+
                 }
             }
         }
     }
 
-    private func expenseForm(_ index: Int, number: Int) -> some View {
-        let expense = draft.expenses[index]
-        return Card {
-            HStack {
-                Label("\(expense.kind.rawValue) \(number)", systemImage: expense.kind.icon).font(.system(size: 14, weight: .semibold))
-                Spacer()
-                Button { deletingExpense = expense.id } label: { Image(systemName: "trash").foregroundStyle(Palette.muted) }.buttonStyle(.plain).help("删除此项费用")
-            }
-            HStack(spacing: 10) {
-                Text("报销人").font(.system(size: 11, weight: .medium)).foregroundStyle(Palette.muted)
-                if (draft.travelerNames ?? []).isEmpty && expense.claimant == nil {
-                    Text("先在基本信息中填写报销人，确认后自动选择第一人。")
-                        .font(.system(size: 11)).foregroundStyle(Palette.muted)
-                } else {
-                    Picker("报销人", selection: $draft.expenses[index].claimant) {
-                        ForEach(draft.travelerNames ?? [], id: \.self) { name in Text(name).tag(Optional(name)) }
-                        if let name = expense.claimant, !(draft.travelerNames ?? []).contains(name) {
-                            Text("\(name)（已移出名单）").tag(Optional(name))
-                        }
-                    }.labelsHidden().fixedSize(horizontal: true, vertical: false)
-                }
-                Spacer(minLength: 0)
-            }
-            if let name = expense.claimant, !(draft.travelerNames ?? []).contains(name) {
-                Text("该人员已移出上方名单，现有费用仍保留；可重新选择报销人。")
-                    .font(.system(size: 10)).foregroundStyle(Palette.muted)
-            }
-            if expense.kind.hasRoute {
-                HStack(spacing: 12) {
-                    LabeledField(title: "起始地") { PlaceField(text: $draft.expenses[index].origin, placeholder: "选择或输入起始地") }
-                    Image(systemName: "arrow.right").foregroundStyle(Palette.muted).padding(.top, 20)
-                    LabeledField(title: "目的地") { PlaceField(text: $draft.expenses[index].destination, placeholder: "选择或输入目的地") }
-                }
-            }
-            HStack(alignment: .bottom, spacing: 20) {
-                LabeledField(title: expense.kind.isTransport ? "本项交通总金额（元）" : expense.kind == .hotel ? "住宿总价（元）" : "每日单价（元）") {
-                    AmountField(cents: Binding(get: {
-                        expense.kind.isTransport || expense.kind == .hotel ? draft.expenses[index].total(in: draft) : draft.expenses[index].unitPrice
-                    }, set: { value in
-                        if expense.kind.isTransport || expense.kind == .hotel {
-                            if draft.expenses[index].total(in: draft) != value { draft.expenses[index].setTotalAmount(value) }
-                        } else if draft.expenses[index].unitPrice != value { draft.expenses[index].setDailyPrice(value) }
-                    }))
-                }.frame(maxWidth: 220)
-                Spacer()
-                VStack(alignment: .trailing, spacing: 5) {
-                    Text("本项合计").font(.system(size: 10)).foregroundStyle(Palette.muted)
-                    Text(Money.format(expense.total(in: draft))).font(.system(size: 24, weight: .semibold, design: .rounded)).foregroundStyle(Palette.accent)
-                }
-            }
-            if !expense.kind.isTransport {
-                HStack {
-                    Text(expense.formula(in: draft)).font(.system(size: 12, weight: .medium)).foregroundStyle(Palette.accent)
-                    Spacer()
-                    if expense.days(in: draft) == 0 && expense.kind != .hotel { Label("请选择日期", systemImage: "info.circle").font(.system(size: 11)).foregroundStyle(.orange) }
-                }.padding(12).background(Palette.accent.opacity(0.05), in: RoundedRectangle(cornerRadius: 8))
-                Toggle(expense.kind == .hotel ? "单独选择入住日期（每个日期计一晚）" : "为这项费用单独选择日期", isOn: Binding(
-                    get: { draft.expenses[index].dates != nil },
-                    set: { draft.expenses[index].dates = $0 ? (expense.kind == .hotel ? expense.defaultStayDates(in: draft) : draft.dates) : nil }
-                )).font(.system(size: 11)).toggleStyle(.switch).controlSize(.small)
-                if expense.kind == .hotel && expense.dates == nil {
-                    Text("默认 \(draft.dates.count) 天 \(expense.days(in: draft)) 晚；金额按住宿总价记录，支持从发票同步。")
-                        .font(.system(size: 10)).foregroundStyle(Palette.muted)
-                }
-                if expense.dates != nil {
-                    CalendarPicker(selection: Binding(get: { draft.expenses[index].dates ?? [] }, set: { draft.expenses[index].dates = $0 })).frame(width: 270)
-                    Text("本项仅使用单独选择的日期，不随上方报销日期变更。").font(.system(size: 10)).foregroundStyle(Palette.muted)
-                }
-            }
-            LabeledField(title: "费用说明") { TextField("选填，例如车次、航班、酒店名称", text: $draft.expenses[index].note) }
-            if expense.kind.acceptsInvoices || !expense.invoices.isEmpty {
-                invoiceSection(index)
-            } else {
-                Label("出差补助无需发票，金额直接计入报销总额。", systemImage: "checkmark.seal")
-                    .font(.system(size: 11)).foregroundStyle(Palette.accent)
-            }
-            if expense.kind == .taxi { itinerarySection(index) }
-        }
-    }
-
-    private func itinerarySection(_ index: Int) -> some View {
-        let expense = draft.expenses[index]
-        return VStack(alignment: .leading, spacing: 12) {
-            Divider().opacity(0.6)
-            HStack {
-                SectionLabel(title: "打车行程单", subtitle: "\((expense.itineraries ?? []).count) 份 · 仅作为附件，不计发票数量、票面金额或差额")
-                Spacer()
-                Button { upload(expenseID: expense.id, role: .itinerary) } label: { Label("上传行程单", systemImage: "doc.badge.plus") }
-            }
-            ForEach(expense.itineraries ?? []) { attachment in
-                HStack(spacing: 12) {
-                    Image(systemName: "list.bullet.rectangle").foregroundStyle(Palette.accent)
-                    EditableAttachmentName(attachment: attachment) { rename(attachment, to: $0, expenseID: expense.id) }
-                    Text("\(attachment.pageCount) 页").foregroundStyle(Palette.muted)
-                    Button { open(attachment) } label: { Image(systemName: "eye") }.help("预览行程单")
-                    Button { removeAttachment(attachment, expenseID: expense.id) } label: { Image(systemName: "trash") }
-                        .buttonStyle(.plain).foregroundStyle(Palette.muted).help("立即删除行程单")
-                }.font(.system(size: 12)).padding(12).background(Palette.canvas, in: RoundedRectangle(cornerRadius: 8))
-            }
-            if (expense.itineraries ?? []).isEmpty {
-                Text("支持多选 PDF 或常见图片；与发票一起预览，并包含在“导出发票”和 Word 中。").font(.system(size: 11)).foregroundStyle(Palette.muted)
-            }
-        }
-    }
-
-    @ViewBuilder private func invoiceSection(_ index: Int) -> some View {
-        let expense = draft.expenses[index]
-            Divider().opacity(0.6)
-            HStack {
-                VStack(alignment: .leading, spacing: 5) {
-                    Text(expense.kind.acceptsInvoices ? "发票附件" : "历史发票附件").font(.system(size: 13, weight: .semibold))
-                    Text("\(expense.invoices.count) 份 PDF · \(expense.invoices.reduce(0) { $0 + $1.pageCount }) 页 · 合计 \(Money.format(expense.invoiceTotal))").font(.system(size: 10)).foregroundStyle(Palette.muted)
-                }
-                Spacer()
-                if expense.kind.acceptsInvoices {
-                    Button { upload(expenseID: expense.id) } label: { Label("上传 PDF 发票", systemImage: "arrow.up.doc") }
-                }
-            }
-            if expense.kind.acceptsInvoices && expense.invoices.isEmpty {
-                Button { upload(expenseID: expense.id) } label: {
-                    HStack(spacing: 12) {
-                        Image(systemName: "doc.badge.plus").font(.system(size: 24, weight: .light))
-                        VStack(alignment: .leading, spacing: 5) {
-                            Text("添加这项费用的发票").font(.system(size: 12, weight: .medium))
-                            Text("支持多选 PDF · 自动识别票面金额，可手动修改").font(.system(size: 10)).foregroundStyle(Palette.muted)
-                        }
-                        Spacer()
-                    }.foregroundStyle(Palette.accent).padding(20).frame(maxWidth: .infinity)
-                        .background(Palette.canvas, in: RoundedRectangle(cornerRadius: 8))
-                        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Palette.accent.opacity(0.25), style: StrokeStyle(lineWidth: 1, dash: [5, 4])))
-                }.buttonStyle(.plain)
-            }
-            if !expense.kind.acceptsInvoices {
-                Text("出差补助无需发票。旧版附件保留在此，可预览或直接删除。").font(.system(size: 10)).foregroundStyle(Palette.muted)
-            }
-            ForEach($draft.expenses[index].invoices) { $invoice in
-                InvoiceRow(invoice: $invoice, open: { open(invoice) }, remove: { removeAttachment(invoice, expenseID: expense.id) },
-                           rename: { rename(invoice, to: $0, expenseID: expense.id) }, amountChanged: { draft.expenses[index].synchronizeInvoiceTotal() })
-            }
-            HStack {
-                Text("本项差额（费用 − 发票）").font(.system(size: 11)).foregroundStyle(Palette.muted)
-                Spacer()
-                Text(Money.format(expense.total(in: draft) - expense.invoiceTotal)).font(.system(size: 13, weight: .semibold)).monospacedDigit()
-            }
+    private var tripLedgerSection: some View {
+        InvoiceLedgerView(claim: $draft,
+                          export: { store.exportLedger(draft) },
+                          files: fileActions,
+                          showsImport: false)
     }
 
     private var coverSection: some View {
         Card {
             HStack {
-                SectionLabel(title: "报销单", subtitle: "上传签字或审批后的报销单，导出时排在说明信息下方、发票上方")
+                SectionLabel(title: "报销单", subtitle: "上传签字或审批后的报销单，打印时排在本记录发票上方")
                 Spacer()
+                Button { store.previewTripForm(draft) } label: { Label("预览报销单", systemImage: "doc.text.magnifyingglass") }
+                    .accessibilityLabel("预览报销单")
                 Button { upload(expenseID: nil) } label: { Label("上传图片", systemImage: "photo.badge.plus") }
             }
             if draft.covers.isEmpty {
@@ -413,40 +285,27 @@ struct ClaimEditor: View {
         }
     }
 
-    private var ledgerAttachments: some View {
-        Card {
-            HStack {
-                SectionLabel(title: "发票附件", subtitle: "\(draft.invoiceCount) 份 PDF · \(draft.expenses.flatMap(\.invoices).reduce(0) { $0 + $1.pageCount }) 页 · 合计 \(Money.format(draft.invoiceTotal))")
-                Spacer()
-                Button(action: importLedgerInvoices) { Label("上传 PDF 发票", systemImage: "arrow.up.doc") }
-                    .buttonStyle(ExportButtonStyle(color: Palette.accent))
-            }
-            if draft.invoiceCount == 0 {
-                Button(action: importLedgerInvoices) {
-                    HStack(spacing: 12) {
-                        Image(systemName: "doc.badge.plus").font(.system(size: 24, weight: .light))
-                        VStack(alignment: .leading, spacing: 5) {
-                            Text("添加发票附件").font(.system(size: 12, weight: .medium))
-                            Text("支持多选 PDF · 自动识别号码与金额并生成清单").font(.system(size: 10)).foregroundStyle(Palette.muted)
-                        }
-                        Spacer()
-                    }.foregroundStyle(Palette.accent).padding(20).frame(maxWidth: .infinity)
-                        .background(Palette.canvas, in: RoundedRectangle(cornerRadius: 8))
-                        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Palette.accent.opacity(0.25), style: StrokeStyle(lineWidth: 1, dash: [5, 4])))
-                }.buttonStyle(.plain)
-            }
-            ForEach(draft.expenses) { expense in
-                if let index = draft.expenses.firstIndex(where: { $0.id == expense.id }) {
-                    ForEach($draft.expenses[index].invoices) { $invoice in
-                        InvoiceRow(invoice: $invoice, open: { open(invoice) },
-                                   remove: { removeAttachment(invoice, expenseID: expense.id) },
-                                   rename: { rename(invoice, to: $0, expenseID: expense.id) }, amountChanged: {})
-                    }
-                }
-            }
-        }
+    private var fileActions: ExpenseFileActions {
+        ExpenseFileActions(upload: { upload(expenseID: $0, role: $1) }, open: open,
+                           hover: { store.hoverAttachment($0, location: $1) },
+                           rename: { rename($0, to: $1, expenseID: $2) },
+                           remove: { removeAttachment($0, expenseID: $1) },
+                           move: { attachment, source, destination in
+            if let updated = store.moveItinerary(attachment, in: draft, from: source, to: destination) { draft = updated }
+        }, duplicateExpense: { id in
+            do { draft = try store.duplicateExpense(id, in: draft) } catch { store.errorMessage = error.localizedDescription }
+        }, duplicateLedgerRow: { id in
+            do { draft = try store.duplicateLedgerRow(id, in: draft) } catch { store.errorMessage = error.localizedDescription }
+        }, removeLedgerRow: { id in
+            if let updated = store.removeLedgerRow(id, in: draft) { draft = updated }
+        }, replaceLedgerInvoice: { id in
+            if let updated = store.chooseLedgerRowInvoice(id, in: draft) { draft = updated }
+        })
     }
 
+    private func batchImport(_ kind: ExpenseKind) {
+        if let updated = store.chooseTripFiles(for: draft, kind: kind) { draft = updated; selectedKind = kind }
+    }
     private func addExpense(_ kind: ExpenseKind) {
         draft.addExpense(kind, unitPrice: ExpenseDefaults.saved().price(for: kind))
         selectedKind = kind
@@ -482,33 +341,9 @@ struct ClaimEditor: View {
     }
 }
 
-private struct InvoiceRow: View {
-    @Binding var invoice: Attachment
-    var open: () -> Void
-    var remove: () -> Void
-    var rename: (String) -> Void
-    var amountChanged: () -> Void
-    var body: some View {
-        HStack(spacing: 12) {
-            HStack(spacing: 12) {
-                Button(action: open) {
-                    Image(systemName: "doc.richtext").font(.system(size: 23, weight: .light)).foregroundStyle(Palette.accent)
-                }.buttonStyle(.plain).help("预览发票")
-                VStack(alignment: .leading, spacing: 5) {
-                    EditableAttachmentName(attachment: invoice, rename: rename)
-                    Text("PDF · \(invoice.pageCount) 页 · 点击名称修改，点击图标预览").font(.system(size: 10)).foregroundStyle(Palette.muted)
-                }.frame(maxWidth: .infinity, alignment: .leading)
-            }
-            LabeledField(title: "票面金额（元）") { AmountField(cents: $invoice.amount) }.frame(width: 135)
-            Button(action: open) { Image(systemName: "eye") }.help("在应用内预览 PDF")
-            Button(action: remove) { Image(systemName: "trash") }.buttonStyle(.plain).foregroundStyle(Palette.muted).help("立即删除发票")
-        }.padding(12).background(Palette.canvas, in: RoundedRectangle(cornerRadius: 8))
-            .onChange(of: invoice.amount) { _, _ in amountChanged() }
-    }
-}
-
 struct EditableAttachmentName: View {
     var attachment: Attachment
+    var centered = false
     var rename: (String) -> Void
     @State private var text = ""
     @State private var editing = false
@@ -530,11 +365,12 @@ struct EditableAttachmentName: View {
                     text = stem; editing = true
                     DispatchQueue.main.async { focused = true }
                 } label: {
-                    Text(attachment.name).lineLimit(1).frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
+                    Text(attachment.name).lineLimit(1).frame(maxWidth: centered ? nil : .infinity, alignment: centered ? .center : .leading).contentShape(Rectangle())
                 }.buttonStyle(.plain).accessibilityLabel("修改附件名称：" + attachment.name)
             }
-        }.font(.system(size: 12)).frame(maxWidth: .infinity, alignment: .leading)
-            .help("点击修改名称，回车或点击其他地方保存")
+        }.font(.system(size: 12)).multilineTextAlignment(centered ? .center : .leading)
+            .frame(maxWidth: centered ? nil : .infinity, alignment: centered ? .center : .leading)
+            .help(attachment.name + "\n点击修改名称，回车或点击其他地方保存")
             .onAppear { text = stem }
             .onChange(of: attachment.name) { _, _ in text = stem }
             .background(OutsideClickObserver(enabled: editing, action: commit))
@@ -547,7 +383,7 @@ struct EditableAttachmentName: View {
     }
 }
 
-private struct PlaceField: View {
+struct PlaceField: View {
     @Binding var text: String
     var placeholder: String
     private let places = ["北京", "上海", "广州", "深圳", "杭州", "南京", "苏州", "成都", "重庆", "武汉", "西安", "长沙", "郑州", "天津", "青岛", "厦门", "福州", "合肥", "济南", "昆明"]
@@ -556,7 +392,7 @@ private struct PlaceField: View {
             TextField(placeholder, text: $text)
             Menu {
                 ForEach(places, id: \.self) { place in Button(place) { text = place } }
-            } label: { Image(systemName: "chevron.down") }.menuStyle(.borderlessButton).fixedSize().help("选择常用城市，也可直接输入站点")
+            } label: { Image(systemName: "chevron.down") }.menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().help("选择常用城市，也可直接输入站点")
         }
     }
 }

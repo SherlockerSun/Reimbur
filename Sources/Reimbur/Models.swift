@@ -7,6 +7,7 @@ enum ClaimStatus: String, Codable, CaseIterable, Identifiable {
 
 enum ClaimKind: String, Codable, CaseIterable, Identifiable {
     case trip = "出差", meal = "餐补", allowance = "补助"
+    var displayName: String { self == .allowance ? "补贴" : rawValue }
     var id: String { rawValue }
     var icon: String {
         switch self { case .trip: return "suitcase.rolling"; case .meal: return "fork.knife"; case .allowance: return "banknote" }
@@ -22,6 +23,7 @@ enum ClaimKind: String, Codable, CaseIterable, Identifiable {
 
 enum ExpenseKind: String, Codable, CaseIterable, Identifiable {
     case subsidy = "出差补助", train = "火车", flight = "飞机", taxi = "打车", hotel = "住宿", meal = "餐补", allowance = "补助"
+    var displayName: String { self == .allowance ? "补贴" : rawValue }
     var id: String { rawValue }
     var icon: String {
         switch self {
@@ -109,6 +111,28 @@ struct Expense: Codable, Identifiable, Equatable {
     var quantity: Int = 1
     var origin = ""
     var destination = ""
+    // Optional markers preserve manual text while keeping earlier station records readable as cities.
+    var originIsCustom: Bool?
+    var destinationIsCustom: Bool?
+    var originCity: String {
+        get { kind == .train && originIsCustom != true ? RailCity.name(origin) : origin }
+        set { origin = newValue; originIsCustom = true }
+    }
+    var destinationCity: String {
+        get { kind == .train && destinationIsCustom != true ? RailCity.name(destination) : destination }
+        set { destination = newValue; destinationIsCustom = true }
+    }
+    mutating func applyRecognizedRailRoute(_ route: RailRoute) {
+        guard kind == .train else { return }
+        if originIsCustom != true { origin = RailCity.name(route.origin) }
+        if destinationIsCustom != true { destination = RailCity.name(route.destination) }
+    }
+    var departureTime: String?
+    var arrivalTime: String?
+    // A missing train arrival date follows departure; an explicit date supports overnight journeys.
+    var effectiveArrivalDate: String? {
+        RailMoment.dayKey(arrivalTime) ?? (kind == .train ? RailMoment.dayKey(departureTime) : nil)
+    }
     var note = ""
     // nil uses the claim calendar; a non-nil set selects this expense's own dates.
     var dates: Set<String>?
@@ -116,6 +140,22 @@ struct Expense: Codable, Identifiable, Equatable {
     // Optional for compatibility with records saved before itinerary support.
     var itineraries: [Attachment]?
     var attachments: [Attachment] { invoices + (itineraries ?? []) }
+    var itinerarySlots: [Attachment?] {
+        let files = itineraries ?? []
+        guard !invoices.isEmpty else { return files.map(Optional.some) }
+        var slots: [Attachment?] = Array(repeating: nil, count: invoices.count)
+        var used = Set<UUID>()
+        for (index, invoice) in invoices.enumerated() {
+            if let number = invoice.number, let file = files.first(where: { $0.number == number && !used.contains($0.id) }) {
+                slots[index] = file; used.insert(file.id)
+            }
+        }
+        for file in files where !used.contains(file.id) {
+            if let empty = slots.firstIndex(where: { $0 == nil }) { slots[empty] = file }
+            else { slots.append(file) } // Preserve historical extra attachments instead of dropping them.
+        }
+        return slots
+    }
     var claimant: String?
     // Rows split from the same group retain their relationship when names are added/removed.
     var subsidyGroupID: UUID?
@@ -175,6 +215,8 @@ struct Claim: Codable, Identifiable, Equatable {
     var savedStatus: ClaimStatus?
     var invoiceLedgerEntries: [InvoiceLedgerEntry]?
     var reimbursementPurpose: String?
+    var department: String?
+    var tripPurpose: String?
     // Independent amount for allowances; nil preserves legacy daily totals until migrated.
     var allowanceAmount: Int64?
     var status: ClaimStatus {
@@ -230,13 +272,15 @@ struct Claim: Codable, Identifiable, Equatable {
     var note = ""
     var expenses: [Expense] = []
     var expenseOrder: [ExpenseKind]?
+    var defaultExpenseRowOrder: [UUID]?
+    var defaultLedgerRowOrder: [UUID]?
     var covers: [Attachment] = []
     var createdAt = Date()
     var updatedAt = Date()
 
     static func make(_ kind: ClaimKind, date: Date = Date()) -> Claim {
         let suffix = DayKey.string(date).replacingOccurrences(of: "-", with: "")
-        var claim = Claim(title: "\(kind.rawValue)报销\(suffix)", kind: kind, createdAt: date, updatedAt: date)
+        var claim = Claim(title: "\(kind.displayName)报销\(suffix)", kind: kind, createdAt: date, updatedAt: date)
         claim.setTravelerNames([])
         claim.expenses = [Expense(kind: kind.categories[0])]
         if kind != .trip { claim.invoiceLedgerEntries = [] }
@@ -278,23 +322,53 @@ struct Claim: Codable, Identifiable, Equatable {
         }
         return claim
     }
-    var ledgerPurpose: String { kind == .meal ? "餐补报销" : reimbursementPurpose ?? "" }
+    var ledgerPurpose: String {
+        switch kind {
+        case .meal: return "餐补报销"
+        case .trip: return tripPurpose ?? ""
+        case .allowance: return reimbursementPurpose ?? ""
+        }
+    }
     var ledgerReimbursementTotal: Int64 { (invoiceLedgerEntries ?? []).reduce(0) { $0 + $1.reimbursementAmount } }
     var invoiceLedgerRows: [InvoiceLedgerRow] {
         (invoiceLedgerEntries ?? []).map { entry in
             InvoiceLedgerRow(entry: entry, invoice: expenses.first { $0.id == entry.expenseID }?.invoices.first { $0.id == entry.invoiceID }, purpose: ledgerPurpose)
         }
     }
+    var invoiceLedgerRowsInTypeOrder: [InvoiceLedgerRow] {
+        guard kind == .trip else { return invoiceLedgerRows }
+        var seen = Set<ExpenseKind>()
+        let typeOrder = (expenseGroups.map(\.kind) + ExpenseKind.allCases).filter { seen.insert($0).inserted }
+        let ranks = Dictionary(uniqueKeysWithValues: typeOrder.enumerated().map { ($0.element, $0.offset) })
+        let expenseKinds = Dictionary(uniqueKeysWithValues: expenses.map { ($0.id, $0.kind) })
+        return invoiceLedgerRows.enumerated().sorted { lhs, rhs in
+            let leftRank = expenseKinds[lhs.element.entry.expenseID].flatMap { ranks[$0] } ?? Int.max
+            let rightRank = expenseKinds[rhs.element.entry.expenseID].flatMap { ranks[$0] } ?? Int.max
+            return leftRank == rightRank ? lhs.offset < rhs.offset : leftRank < rightRank
+        }.map(\.element)
+    }
     // Backfill invoice metadata once; the existing daily reimbursement calculation stays independent.
     var withInvoiceLedger: Claim {
-        guard kind != .trip, invoiceLedgerEntries == nil else { return self }
+        if invoiceLedgerEntries != nil {
+            guard kind == .trip else { return self }
+            var claim = self
+            for index in claim.invoiceLedgerEntries!.indices where claim.invoiceLedgerEntries![index].detail.isEmpty {
+                if let expense = claim.expenses.first(where: { $0.id == claim.invoiceLedgerEntries![index].expenseID }) {
+                    claim.invoiceLedgerEntries![index].detail = expense.kind.displayName
+                }
+            }
+            return claim == self ? self : claim
+        }
+        if kind == .trip && expenses.flatMap(\.invoices).isEmpty { return self }
         var claim = self
         var entries: [InvoiceLedgerEntry] = []
         for expense in expenses {
             for invoice in expense.invoices {
                 entries.append(InvoiceLedgerEntry(id: invoice.id, expenseID: expense.id, invoiceID: invoice.id,
                                                   date: expense.dates?.sorted().first ?? dates.sorted().first ?? DayKey.string(createdAt),
-                                                  claimant: expense.claimant ?? travelerNames?.first, reimbursementAmount: invoice.amount, detail: expense.note))
+                                                  claimant: expense.claimant ?? travelerNames?.first,
+                                                  reimbursementAmount: invoice.amount,
+                                                  detail: kind == .trip ? expense.kind.displayName : expense.note))
             }
         }
         claim.invoiceLedgerEntries = entries
@@ -348,6 +422,24 @@ struct Claim: Codable, Identifiable, Equatable {
         order.remove(at: old)
         order.insert(kind, at: index)
         expenseOrder = order
+    }
+    mutating func moveExpense(_ id: UUID, within kind: ExpenseKind, to target: Int) {
+        let slots = expenses.indices.filter { expenses[$0].kind == kind }
+        var items = slots.map { expenses[$0] }
+        guard let old = items.firstIndex(where: { $0.id == id }), items.indices.contains(target), old != target else { return }
+        let item = items.remove(at: old); items.insert(item, at: target)
+        for (index, item) in zip(slots, items) { expenses[index] = item }
+    }
+    mutating func moveLedgerRow(_ id: UUID, to target: Int) {
+        guard var entries = invoiceLedgerEntries, let old = entries.firstIndex(where: { $0.id == id }),
+              entries.indices.contains(target), old != target else { return }
+        let item = entries.remove(at: old); entries.insert(item, at: target)
+        invoiceLedgerEntries = entries
+        // Keep attachment order aligned with the ledger when it is printed or previewed.
+        let ranks = Dictionary(entries.enumerated().compactMap { index, entry in entry.invoiceID.map { ($0, index) } }, uniquingKeysWith: min)
+        for index in expenses.indices {
+            expenses[index].invoices.sort { ranks[$0.id, default: Int.max] < ranks[$1.id, default: Int.max] }
+        }
     }
     var dateSummary: String {
         let sorted = dates.sorted()

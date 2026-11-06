@@ -1,82 +1,89 @@
 import SwiftUI
 
-// Shared widths keep headers and editable cells aligned; spare space goes to longer text.
 enum InvoiceLedgerColumns {
-    static let titles = ["序号", "日期", "姓名", "发票号码", "金额（元）", "报销单金额", "明细", "用途"]
-    static let spacing: CGFloat = 8
-    static func widths(for available: CGFloat) -> [CGFloat] {
-        let minimum: [CGFloat] = [30, 122, 86, 184, 98, 104, 112, 90]
-        let extra = max(0, available - minimum.reduce(0, +) - spacing * 7 - 20)
-        let weights: [CGFloat] = [0, 0, 0.1, 0.2, 0.05, 0.05, 0.4, 0.2]
-        return zip(minimum, weights).map { $0 + extra * $1 }
-    }
+    static let columns: [ReimbursementColumn] = [
+        ReimbursementColumn(id: "sequence", title: "序号", width: 48, minimum: 44, alignment: .center),
+        ReimbursementColumn(id: "date", title: "日期", width: 144, minimum: 140),
+        ReimbursementColumn(id: "person", title: "报销人", width: 100, minimum: 88),
+        ReimbursementColumn(id: "number", title: "发票号码", width: 180, minimum: 160),
+        ReimbursementColumn(id: "invoice", title: "发票", width: 280, minimum: 190, growth: 1),
+        ReimbursementColumn(id: "amount", title: "发票金额（元）", width: 116, minimum: 110, alignment: .center),
+        ReimbursementColumn(id: "reimbursement", title: "报销单金额（元）", width: 132, minimum: 124, alignment: .center),
+        ReimbursementColumn(id: "detail", title: "明细", width: 140, minimum: 100),
+        ReimbursementColumn(id: "purpose", title: "用途", width: 110, minimum: 88),
+        ReimbursementColumn(id: "operations", title: "操作", width: 108, minimum: 108, alignment: .center)
+    ]
+    static var titles: [String] { columns.map(\.title) }
+    static func widths(for available: CGFloat) -> [CGFloat] { ReimbursementColumnSizing.widths(columns, available: available, overrides: [:]) }
 }
 
 struct InvoiceLedgerView: View {
     @Binding var claim: Claim
     var export: () -> Void
+    var files = ExpenseFileActions()
+    var importInvoices: () -> Void = {}
+    var showsImport = true
+    @State private var tripRowsInTypeOrder = true
 
     var body: some View {
         Card {
-            HStack(alignment: .center) {
-                SectionLabel(title: "报销清单", subtitle: "点击单元格编辑；发票在下方“发票附件”中导入和管理")
+            HStack {
+                SectionLabel(title: "报销清单", subtitle: "发票与费用逐行核对")
+                    .contextMenu { Button("导出报销清单（XLSX）", action: export) }
+                    .help("右键清单标题可导出 XLSX")
                 Spacer(minLength: 12)
-                Button(action: export) { Image(systemName: "square.and.arrow.up").frame(width: 28, height: 28).contentShape(Rectangle()) }
-                    .buttonStyle(.plain).foregroundStyle(Palette.accent)
-                    .help("导出 XLSX 报销清单").accessibilityLabel("导出 XLSX 报销清单")
+                Button(action: export) {
+                    Label("导出", systemImage: "arrow.down.doc")
+                }.buttonStyle(ExportButtonStyle(color: Palette.accent))
+                    .help("导出报销清单（Excel）")
+                    .accessibilityLabel("导出报销清单 Excel")
+                if showsImport {
+                    Button(action: importInvoices) { Label("导入", systemImage: "tray.and.arrow.down") }
+                        .buttonStyle(ExportButtonStyle(color: Palette.accent))
+                }
+
             }
-            if claim.invoiceLedgerRows.isEmpty {
+            if rows.isEmpty {
                 VStack(spacing: 10) {
                     Image(systemName: "tablecells").font(.system(size: 28, weight: .light)).foregroundStyle(Palette.accent)
-                    Text("在下方导入发票后，自动生成清单").font(.system(size: 12)).foregroundStyle(Palette.muted)
+                    Text("暂无发票，点击右上角“导入”添加").font(.system(size: 12)).foregroundStyle(Palette.muted)
                 }.frame(maxWidth: .infinity).padding(.vertical, 30)
                     .background(Palette.canvas, in: RoundedRectangle(cornerRadius: 9))
             } else {
-                GeometryReader { geometry in
-                    let widths = InvoiceLedgerColumns.widths(for: geometry.size.width)
-                    ScrollView(.horizontal) {
-                        VStack(spacing: 0) {
-                            HStack(spacing: InvoiceLedgerColumns.spacing) {
-                                ForEach(InvoiceLedgerColumns.titles.indices, id: \.self) { index in
-                                    Text(InvoiceLedgerColumns.titles[index])
-                                        .frame(width: widths[index], alignment: index == 0 ? .center : (index == 4 || index == 5 ? .trailing : .leading))
-                                }
-                            }.font(.system(size: 11, weight: .medium)).foregroundStyle(Palette.muted)
-                                .padding(.horizontal, 10).frame(height: 38).background(Palette.canvas)
-                            ForEach(Array(claim.invoiceLedgerRows.enumerated()), id: \.element.id) { index, row in
-                                InvoiceLedgerTableRow(claim: $claim, row: row, number: index + 1, widths: widths)
-                            }
-                        }.padding(.bottom, 12)
-                    }
-                }.frame(height: CGFloat(38 + claim.invoiceLedgerRows.count * 48 + 12))
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                ReimbursementTable(id: "ledger.\(claim.kind.id)", columns: InvoiceLedgerColumns.columns, rows: rows,
+                                   rowHeight: { _ in 60 }, sort: {
+                                       if claim.kind == .trip { tripRowsInTypeOrder = $1 == nil }
+                                       claim.sortLedgerRows(column: $0, ascending: $1)
+                                   }) { row, index, column in
+                    InvoiceLedgerCell(claim: $claim, row: row, number: index + 1, column: column, files: files)
+                }
             }
             ViewThatFits(in: .horizontal) {
-                HStack(spacing: 20) {
-                    rowCount
-                    Spacer(minLength: 0)
-                    invoiceTotal
-                    reimbursementTotal
-                }
-                VStack(alignment: .leading, spacing: 8) {
-                    rowCount
-                    invoiceTotal
-                    reimbursementTotal
-                }
+                HStack(spacing: 20) { rowCount; Spacer(minLength: 0); invoiceTotal; reimbursementTotal }
+                VStack(alignment: .leading, spacing: 8) { rowCount; invoiceTotal; reimbursementTotal }
             }.font(.system(size: 11)).monospacedDigit()
             HStack {
                 Text("差额（报销总额 − 发票总额）").foregroundStyle(Palette.muted)
                 Spacer()
                 Text(Money.format(claim.difference)).fontWeight(.medium).monospacedDigit()
             }.font(.system(size: 11))
-            Text(claim.kind == .allowance ? "报销总额在基本信息中填写，与清单金额独立。" : "报销总额按天数 × 单价计算，与清单金额独立。")
+            Text(ledgerHint)
                 .font(.system(size: 10)).foregroundStyle(Palette.muted)
         }
+        .onChange(of: claim.id) { _, _ in tripRowsInTypeOrder = true }
     }
-    private var rowCount: some View { Text("\(claim.invoiceLedgerRows.count) 行 · \(claim.invoiceCount) 份发票").fixedSize() }
+    private var rows: [InvoiceLedgerRow] {
+        claim.kind == .trip && tripRowsInTypeOrder ? claim.invoiceLedgerRowsInTypeOrder : claim.invoiceLedgerRows
+    }
+    private var rowCount: some View { Text("\(rows.count) 行 · \(claim.invoiceCount) 份发票").fixedSize() }
     private var invoiceTotal: some View { Text("票面合计 \(Money.format(claim.invoiceTotal))").fixedSize() }
-    private var reimbursementTotal: some View {
-        Text("报销单金额合计 \(Money.format(claim.ledgerReimbursementTotal))").foregroundStyle(Palette.accent).fixedSize()
+    private var reimbursementTotal: some View { Text("报销单金额合计 \(Money.format(claim.ledgerReimbursementTotal))").foregroundStyle(Palette.accent).fixedSize() }
+    private var ledgerHint: String {
+        switch claim.kind {
+        case .allowance: return "报销总额在基本信息中填写，与清单金额独立。"
+        case .meal: return "报销总额按天数 × 单价计算，与清单金额独立。"
+        case .trip: return "用途自动取出差事由，报销总额按费用明细计算。"
+        }
     }
 }
 
@@ -86,11 +93,10 @@ struct LedgerDateField: View {
     var body: some View {
         Button { showingCalendar.toggle() } label: {
             HStack(spacing: 6) {
-                Text(value).monospacedDigit()
-                Spacer(minLength: 0)
+                Text(value).monospacedDigit().fixedSize(horizontal: true, vertical: false)
                 Image(systemName: "calendar").foregroundStyle(Palette.muted)
             }.font(.system(size: 11)).foregroundStyle(Palette.ink)
-                .padding(.horizontal, 8).frame(height: 27)
+                .padding(.horizontal, 8).frame(maxWidth: .infinity).frame(height: 27)
                 .background(.white, in: RoundedRectangle(cornerRadius: 6))
                 .overlay(RoundedRectangle(cornerRadius: 6).stroke(Palette.ink.opacity(0.12)))
                 .contentShape(Rectangle())
@@ -111,11 +117,12 @@ struct LedgerDateField: View {
     }
 }
 
-private struct InvoiceLedgerTableRow: View {
+private struct InvoiceLedgerCell: View {
     @Binding var claim: Claim
     var row: InvoiceLedgerRow
     var number: Int
-    var widths: [CGFloat]
+    var column: ReimbursementColumn
+    var files: ExpenseFileActions
     private var names: [String] {
         var names = claim.travelerNames ?? []
         if let name = row.entry.claimant, !names.contains(name) { names.append(name) }
@@ -138,28 +145,33 @@ private struct InvoiceLedgerTableRow: View {
         })
     }
     var body: some View {
-        HStack(spacing: InvoiceLedgerColumns.spacing) {
-            Text("\(number)").foregroundStyle(Palette.muted).monospacedDigit().frame(width: widths[0])
-            LedgerDateField(value: entryBinding(\.date)).frame(width: widths[1])
-            Picker("报销人", selection: entryBinding(\.claimant)) {
-                Text("未填写").tag(nil as String?)
-                ForEach(names, id: \.self) { Text($0).tag(Optional($0)) }
-            }.labelsHidden().frame(width: widths[2])
-            TextField("发票号码", text: Binding(get: { invoiceBinding(\.number, fallback: nil).wrappedValue ?? "" },
-                                                set: { invoiceBinding(\.number, fallback: nil).wrappedValue = $0 }))
-                .monospacedDigit().frame(width: widths[3]).accessibilityLabel("发票号码 \(number)")
-            Group {
-                if row.invoice != nil { AmountField(cents: invoiceBinding(\.amount, fallback: 0)).accessibilityLabel("发票金额 \(number)") }
-                else { Text("—").foregroundStyle(Palette.muted).frame(maxWidth: .infinity, alignment: .trailing) }
-            }.multilineTextAlignment(.trailing).frame(width: widths[4])
-            AmountField(cents: entryBinding(\.reimbursementAmount)).multilineTextAlignment(.trailing)
-                .frame(width: widths[5]).accessibilityLabel("报销单金额 \(number)")
-            TextField("填写明细", text: entryBinding(\.detail)).frame(width: widths[6]).accessibilityLabel("明细 \(number)")
-            Text(claim.ledgerPurpose.isEmpty ? "未填写" : claim.ledgerPurpose).foregroundStyle(claim.ledgerPurpose.isEmpty ? Palette.muted : Palette.ink)
-                .lineLimit(1).truncationMode(.tail).help(claim.ledgerPurpose).frame(width: widths[7], alignment: .leading)
-        }.font(.system(size: 11)).textFieldStyle(.roundedBorder)
-            .padding(.horizontal, 10).frame(height: 48)
-            .background(number.isMultiple(of: 2) ? Palette.canvas.opacity(0.55) : .white)
-            .overlay(alignment: .bottom) { Divider().opacity(0.4) }
+        Group {
+            switch column.id {
+            case "date": LedgerDateField(value: entryBinding(\.date)).help(entryBinding(\.date).wrappedValue)
+            case "person": TablePersonField(selection: entryBinding(\.claimant), names: names)
+            case "number":
+                TextField("发票号码", text: Binding(get: { invoiceBinding(\.number, fallback: nil).wrappedValue ?? "" },
+                                                   set: { invoiceBinding(\.number, fallback: nil).wrappedValue = $0 }))
+                    .monospacedDigit().help(row.invoice?.number ?? "未识别发票号码").accessibilityLabel("发票号码 \(number)")
+            case "invoice":
+                if let invoice = row.invoice { InvoiceFileCell(attachment: invoice, expenseID: row.entry.expenseID, actions: files) }
+                else { Text("未上传").foregroundStyle(Palette.muted) }
+            case "amount":
+                if let invoice = row.invoice { AmountField(cents: invoiceBinding(\.amount, fallback: 0)).multilineTextAlignment(.center).help(Money.format(invoice.amount)).accessibilityLabel("发票金额 \(number)") }
+                else { Text("—").foregroundStyle(Palette.muted) }
+            case "reimbursement":
+                AmountField(cents: entryBinding(\.reimbursementAmount)).multilineTextAlignment(.center).help(Money.format(row.entry.reimbursementAmount)).accessibilityLabel("报销单金额 \(number)")
+            case "detail": TextField("填写明细", text: entryBinding(\.detail)).help(row.entry.detail).accessibilityLabel("明细 \(number)")
+            case "purpose": Text(claim.ledgerPurpose.isEmpty ? "未填写" : claim.ledgerPurpose).foregroundStyle(claim.ledgerPurpose.isEmpty ? Palette.muted : Palette.ink)
+                    .lineLimit(1).truncationMode(.tail).help(claim.ledgerPurpose)
+            case "operations":
+                HStack(spacing: 3) {
+                    TableActionButton(title: "复制第\(number)行", icon: "doc.on.doc") { files.duplicateLedgerRow(row.id) }
+                    TableActionButton(title: "上传第\(number)行发票", icon: "square.and.arrow.up") { files.replaceLedgerInvoice(row.id) }
+                    TableActionButton(title: "删除第\(number)行", icon: "trash", destructive: true) { files.removeLedgerRow(row.id) }
+                }
+            default: EmptyView()
+            }
+        }.font(.system(size: 11)).textFieldStyle(.roundedBorder).multilineTextAlignment(.center)
     }
 }

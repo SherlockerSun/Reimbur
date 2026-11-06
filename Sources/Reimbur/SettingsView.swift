@@ -5,9 +5,12 @@ struct ExpenseDefaults: Equatable {
     var subsidy: Int64 = 0
     var meal: Int64 = 0
     var travelerNames: [String] = []
+    var department = ""
+    var tripPurpose = ""
     static func saved(in defaults: UserDefaults = .standard) -> Self {
         func amount(_ key: String) -> Int64 { max(0, min(Money.maximumCents, Int64(defaults.integer(forKey: key)))) }
-        return Self(subsidy: amount("defaultSubsidy"), meal: amount("defaultMeal"), travelerNames: AppPreferences.travelerNames(in: defaults))
+        return Self(subsidy: amount("defaultSubsidy"), meal: amount("defaultMeal"), travelerNames: AppPreferences.travelerNames(in: defaults),
+                    department: defaults.string(forKey: "defaultDepartment") ?? "", tripPurpose: defaults.string(forKey: "defaultTripPurpose") ?? "")
     }
     func price(for kind: ExpenseKind) -> Int64 {
         switch kind { case .subsidy: return subsidy; case .meal: return meal; default: return 0 }
@@ -23,6 +26,8 @@ struct SettingsView: View {
     @AppStorage("defaultTravelerNames") private var travelerNames = "[]"
     @AppStorage("invoiceNameFormat") private var invoiceFormat = AttachmentNaming.defaultFormat
     @AppStorage("itineraryNameFormat") private var itineraryFormat = AttachmentNaming.defaultFormat
+    @AppStorage("defaultDepartment") private var department = ""
+    @AppStorage("defaultTripPurpose") private var tripPurpose = ""
     @State private var pathCopied = false
     private var version: String { Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "开发版" }
     var body: some View {
@@ -51,12 +56,20 @@ struct SettingsView: View {
                 }
                 Card {
                     SectionLabel(title: "默认值", subtitle: "用于新建记录或添加费用；已有记录保留当前设置")
-                    HStack(alignment: .top, spacing: 24) {
-                        LabeledField(title: "默认报销人") {
+                    LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 24, alignment: .topLeading), count: 3), alignment: .leading, spacing: 16) {
+                        LabeledField(title: "报销人") {
                             PeopleTagInput(names: Binding(get: { AppPreferences.decodeNames(travelerNames) }, set: { travelerNames = AppPreferences.encodeNames($0) }))
-                        }.frame(maxWidth: .infinity)
-                        price("出差补助 / 人天", value: $subsidy).frame(width: 170)
-                        price("餐补 / 天", value: $meal).frame(width: 170)
+                        }.frame(maxWidth: .infinity, alignment: .leading)
+                        price("出差补助 / 人天", value: $subsidy).frame(maxWidth: .infinity, alignment: .leading)
+                        price("餐补 / 天", value: $meal).frame(maxWidth: .infinity, alignment: .leading)
+                        LabeledField(title: "部门") {
+                            TextField("填写部门", text: $department).accessibilityLabel("部门").modifier(DefaultValueInputStyle())
+                        }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        LabeledField(title: "出差事由") {
+                            TextField("填写出差事由", text: $tripPurpose).accessibilityLabel("出差事由").modifier(DefaultValueInputStyle())
+                        }
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
                 Card {
@@ -71,14 +84,14 @@ struct SettingsView: View {
                         .font(.system(size: 11)).foregroundStyle(Palette.muted)
                 }
                 Card {
-                    SectionLabel(title: "打印文档导出", subtitle: "仅导出报销单、发票与行程单，不添加文字说明")
+                    SectionLabel(title: "打印发票", subtitle: "仅导出报销单、发票与行程单，不添加文字说明")
                     Text("每页上下各一张，火车票连续打印两份；行程单自动裁切底部空白，PDF 的全部页面均保留。")
                         .font(.system(size: 11)).foregroundStyle(Palette.muted)
                     HStack {
                         Text("共 \(store.claims.count) 条记录 · \(store.claims.reduce(0) { $0 + $1.invoiceCount }) 份发票")
                             .font(.system(size: 12)).foregroundStyle(Palette.muted)
                         Spacer()
-                        Button { store.export(store.claims) } label: { Label("导出全部打印文档", systemImage: "square.and.arrow.up") }
+                        Button { store.export(store.claims) } label: { Label("打印全部发票", systemImage: "printer") }
                             .buttonStyle(.borderedProminent).disabled(store.claims.isEmpty || store.exporting || !store.ready)
                     }
                 }
@@ -113,9 +126,15 @@ struct SettingsView: View {
     private func price(_ title: String, value: Binding<Int>) -> some View {
         LabeledField(title: title) {
             AmountField(cents: Binding(get: { Int64(value.wrappedValue) }, set: { value.wrappedValue = Int($0) }))
-                .textFieldStyle(.plain).padding(.horizontal, 10).frame(height: 38)
-                .background(.white, in: RoundedRectangle(cornerRadius: 7))
-                .overlay(RoundedRectangle(cornerRadius: 7).stroke(Palette.ink.opacity(0.18)))
+                .modifier(DefaultValueInputStyle())
         }
+    }
+}
+
+private struct DefaultValueInputStyle: ViewModifier {
+    func body(content: Content) -> some View {
+        content.textFieldStyle(.plain).padding(.horizontal, 10).frame(maxWidth: .infinity).frame(height: 38)
+            .background(.white, in: RoundedRectangle(cornerRadius: 7))
+            .overlay(RoundedRectangle(cornerRadius: 7).stroke(Palette.ink.opacity(0.18)))
     }
 }

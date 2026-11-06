@@ -17,7 +17,7 @@ struct PeriodPicker: View {
                 Text("所有月份").tag(0)
                 ForEach(1...12, id: \.self) { Text("\($0) 月").tag($0) }
             }.labelsHidden()
-        }.font(.system(size: 11)).help("出差、餐补按首个报销日期筛选；补助及未选日期的记录按创建日期筛选")
+        }.font(.system(size: 11)).help("出差、餐补按首个报销日期筛选；补贴及未选日期的记录按创建日期筛选")
     }
 }
 
@@ -76,11 +76,11 @@ struct DashboardView: View {
                     }.frame(width: 330)
                 }
                 Card {
-                    SectionLabel(title: "分类统计", subtitle: "出差、餐补按首个报销日；补助及未选日期的记录按创建日")
+                    SectionLabel(title: "分类统计", subtitle: "出差、餐补按首个报销日；补贴及未选日期的记录按创建日")
                     ForEach(ClaimKind.allCases) { kind in
                         let items = records.filter { $0.kind == kind }
                         HStack {
-                            Label("\(kind.rawValue)报销", systemImage: kind.icon).frame(width: 120, alignment: .leading)
+                            Label("\(kind.displayName)报销", systemImage: kind.icon).frame(width: 120, alignment: .leading)
                             Text("\(items.count) 条记录").foregroundStyle(Palette.muted)
                             Spacer()
                             Text(Money.format(items.reduce(0) { $0 + $1.total })).monospacedDigit().fontWeight(.medium)

@@ -140,7 +140,7 @@ struct AttachmentPreview: View {
                 Divider().frame(height: 18)
                 PreviewIconButton(title: copied ? "已复制" : "复制", icon: copied ? "checkmark" : "doc.on.doc", action: copy)
                 PreviewIconButton(title: "下载", icon: "arrow.down.to.line", action: download)
-            }.padding(16).background(.white)
+            }.padding(.trailing, 38).padding(16).background(.white)
             Divider()
             ZStack {
                 if let error = session.errorMessage {
@@ -152,7 +152,7 @@ struct AttachmentPreview: View {
                     InteractiveAttachmentCanvas(image: image, contentID: session.contentID, copy: copy, download: download,
                                                 previous: { session.move(-1) }, next: { session.move(1) }, close: dismissPreview)
                 }
-            }.frame(maxWidth: .infinity, maxHeight: .infinity)
+            }.frame(maxWidth: .infinity, maxHeight: .infinity).clipped()
                 .overlay {
                     HStack {
                         edgeButton(previous: true)
@@ -208,7 +208,7 @@ struct InteractiveAttachmentCanvas: NSViewRepresentable {
     }
 }
 
-final class AttachmentCanvasView: NSView {
+final class AttachmentCanvasView: PreviewCanvasView {
     private var image: NSImage?
     private(set) var contentID = ""
     private var lastDragPoint: CGPoint?

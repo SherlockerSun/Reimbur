@@ -16,7 +16,7 @@ import AppKit
         .commands {
             CommandGroup(replacing: .newItem) {
                 ForEach(ClaimKind.allCases) { kind in
-                    Button("新建\(kind.rawValue)报销") { _ = store.create(kind, defaults: ExpenseDefaults.saved()) }.disabled(!store.ready)
+                    Button("新建\(kind.displayName)报销") { _ = store.create(kind, defaults: ExpenseDefaults.saved()) }.disabled(!store.ready)
                 }
             }
             CommandGroup(replacing: .appSettings) {
@@ -45,7 +45,6 @@ struct WorkspaceView: View {
     @State private var deleting = Set<UUID>()
     @State private var renaming: UUID?
     @State private var newTitle = ""
-    @State private var summary: Claim?
     private var filtered: [Claim] {
         store.claims.filter(ClaimRecordFilter(kind: filter, status: statusFilter, period: period, search: search).matches)
             .sorted { $0.createdAt > $1.createdAt }
@@ -98,15 +97,7 @@ struct WorkspaceView: View {
             }
             Button("取消", role: .cancel) { deleting = [] }
         } message: { Text("所选记录、费用及其本地附件将一起删除。") }
-        .overlay {
-            if let request = store.preview {
-                DismissibleOverlay(close: { store.preview = nil }) {
-                    AttachmentPreview(request: request, close: { store.preview = nil }).id(request.id)
-                }
-            } else if let claim = summary {
-                DismissibleOverlay(close: { summary = nil }) { ClaimTextPreview(claim: claim, close: { summary = nil }) }
-            }
-        }
+        .overlay { WorkspacePreviewLayer() }
         .overlay {
             if store.exporting {
                 ZStack {
@@ -148,7 +139,7 @@ struct WorkspaceView: View {
             }
             SidebarItem(title: "全部记录", icon: "tray.full", selected: !home && !store.showSettings && filter == nil, count: store.claims.count, compact: menuCollapsed) { navigate(nil) }
             ForEach(ClaimKind.allCases) { kind in
-                SidebarItem(title: "\(kind.rawValue)报销", icon: kind.icon, selected: !home && !store.showSettings && filter == kind,
+                SidebarItem(title: "\(kind.displayName)报销", icon: kind.icon, selected: !home && !store.showSettings && filter == kind,
                             count: store.claims.filter { $0.kind == kind }.count, compact: menuCollapsed) { navigate(kind) }
             }
             Spacer()
@@ -189,7 +180,7 @@ struct WorkspaceView: View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 14) {
                 HStack {
-                    Text(filter.map { "\($0.rawValue)报销" } ?? "全部记录").font(.system(size: 18, weight: .semibold))
+                    Text(filter.map { "\($0.displayName)报销" } ?? "全部记录").font(.system(size: 18, weight: .semibold))
                     Spacer(); newButton
                 }
                 HStack { Image(systemName: "magnifyingglass"); TextField("搜索名称、人员或备注", text: $search).textFieldStyle(.plain) }
@@ -232,10 +223,10 @@ struct WorkspaceView: View {
     @ViewBuilder private var newButton: some View {
         if let filter {
             Button { create(filter) } label: { Label("新建", systemImage: "plus.circle.fill") }
-                .buttonStyle(.plain).foregroundStyle(Palette.accent).help("新建\(filter.rawValue)报销").disabled(!store.ready)
+                .buttonStyle(.plain).foregroundStyle(Palette.accent).help("新建\(filter.displayName)报销").disabled(!store.ready)
         } else {
             Menu {
-                ForEach(ClaimKind.allCases) { kind in Button("新建\(kind.rawValue)报销", systemImage: kind.icon) { create(kind) } }
+                ForEach(ClaimKind.allCases) { kind in Button("新建\(kind.displayName)报销", systemImage: kind.icon) { create(kind) } }
             } label: { Label("新建", systemImage: "plus.circle.fill").foregroundStyle(Palette.accent) }
                 .menuStyle(.borderlessButton).fixedSize().disabled(!store.ready)
         }
@@ -248,7 +239,7 @@ struct WorkspaceView: View {
             } label: {
                 VStack(alignment: .leading, spacing: 10) {
                     HStack {
-                        Label(claim.kind.rawValue, systemImage: claim.kind.icon).font(.system(size: 10)).foregroundStyle(claim.status.color)
+                        Label(claim.kind.displayName, systemImage: claim.kind.icon).font(.system(size: 10)).foregroundStyle(claim.status.color)
                         Spacer()
                         Text(DayKey.string(ClaimPeriodFilter.date(for: claim))).font(.system(size: 9)).foregroundStyle(Palette.muted)
                     }
@@ -277,9 +268,9 @@ struct WorkspaceView: View {
                 else { selectedID = claim.id }
             }
             .contextMenu {
-                Button("预览清单", systemImage: "eye") { summary = claim }
+                Button("预览清单", systemImage: "eye") { store.previewSummary(claim) }
                 Button("复制清单", systemImage: "doc.on.doc") { copySummary(claim) }
-                Button("导出发票", systemImage: "archivebox") { store.exportInvoices(claim) }
+                Button("导出发票", systemImage: "folder") { store.exportInvoices(claim) }
                     .disabled(store.exporting || claim.expenses.flatMap(\.attachments).isEmpty)
                 Divider()
                 Menu("切换状态") {
@@ -350,7 +341,7 @@ struct ClaimTextPreview: View {
                 PreviewIconButton(title: copied ? "已复制" : (person == nil ? "复制总览" : "复制个人清单"), icon: copied ? "checkmark" : "doc.on.doc") {
                     NSPasteboard.general.clearContents(); NSPasteboard.general.setString(text, forType: .string); copied = true
                 }
-            }.padding(18).background(.white)
+            }.padding(.trailing, 38).padding(18).background(.white)
             Divider()
             HStack(spacing: 16) {
                 ScrollViewReader { reader in

@@ -57,6 +57,72 @@ private struct LedgerDateInteractionView: View {
     var body: some View { LedgerDateField(value: $state.value).frame(width: 122).padding(20).background(.white) }
 }
 
+@MainActor private final class TripListState: ObservableObject {
+    @Published var claim: Claim
+    init(_ claim: Claim) { self.claim = claim }
+}
+private struct TripListInteractionView: View {
+    @ObservedObject var state: TripListState
+    var store: ClaimStore
+    var body: some View {
+        TripExpenseListView(claim: $state.claim, kind: .train, remove: { _ in }, files: verificationFileActions(state, store))
+            .padding(20).background(.white).onChange(of: state.claim) { _, value in _ = store.save(value) }
+    }
+}
+
+private struct AdjustableTripInteractionView: View {
+    @ObservedObject var state: TripListState
+    var store: ClaimStore
+    var kind: ExpenseKind
+    var body: some View {
+        TripExpenseListView(claim: $state.claim, kind: kind, remove: { id in state.claim.expenses.removeAll { $0.id == id } }, files: verificationFileActions(state, store))
+            .padding(20).background(.white).onChange(of: state.claim) { _, value in _ = store.save(value) }
+    }
+}
+
+private struct TripAttachmentsInteractionView: View {
+    @ObservedObject var state: TripListState
+    var store: ClaimStore
+    var body: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            Card { TripExpenseListView(claim: $state.claim, kind: .taxi, remove: { _ in }, files: verificationFileActions(state, store)) }
+            Spacer(minLength: 0)
+        }.padding(20).background(Palette.canvas).onChange(of: state.claim) { _, value in _ = store.save(value) }
+    }
+}
+
+private struct InlineLedgerInteractionView: View {
+    @ObservedObject var state: TripListState
+    var store: ClaimStore
+    var body: some View {
+        InvoiceLedgerView(claim: $state.claim, export: {}, files: verificationFileActions(state, store))
+            .padding(20).background(Palette.canvas).onChange(of: state.claim) { _, value in _ = store.save(value) }
+    }
+}
+
+private struct SubsidyListInteractionView: View {
+    @ObservedObject var state: TripListState
+    var body: some View {
+        TripExpenseListView(claim: $state.claim, kind: .subsidy, remove: { _ in }).padding(20).background(.white)
+    }
+}
+
+@MainActor private func verificationFileActions(_ state: TripListState, _ store: ClaimStore) -> ExpenseFileActions {
+    ExpenseFileActions(open: { store.previewAttachment($0, in: state.claim) }, hover: { store.hoverAttachment($0, location: $1) }, rename: { attachment, name, id in
+        if let value = try? store.renameAttachment(attachment, to: name, in: state.claim, expenseID: id) { state.claim = value }
+    }, remove: { attachment, id in
+        if let value = store.removeAttachment(attachment, from: state.claim, expenseID: id) { state.claim = value }
+    }, move: { attachment, source, destination in
+        if let value = store.moveItinerary(attachment, in: state.claim, from: source, to: destination) { state.claim = value }
+    }, duplicateExpense: { id in
+        if let value = try? store.duplicateExpense(id, in: state.claim) { state.claim = value }
+    }, duplicateLedgerRow: { id in
+        if let value = try? store.duplicateLedgerRow(id, in: state.claim) { state.claim = value }
+    }, removeLedgerRow: { id in
+        if let value = store.removeLedgerRow(id, in: state.claim) { state.claim = value }
+    })
+}
+
 final class ReimburChecks {
     private var temporary: URL!
     func setUpWithError() throws {
@@ -64,6 +130,1130 @@ final class ReimburChecks {
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
     }
     func tearDownWithError() throws { try FileManager.default.removeItem(at: temporary) }
+
+    @MainActor func testGlobalPreviewsAndCloseButtons() throws {
+        let qa = ProcessInfo.processInfo.environment["REIMBUR_QA_DIR"].map { URL(fileURLWithPath: $0) } ?? temporary!
+        let suite = "Reimbur-global-previews-\(UUID())", defaults = UserDefaults(suiteName: suite)!
+        defaults.set("records", forKey: "startupPage")
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = ClaimStore(root: temporary.appendingPathComponent("db"))
+        let claim = tripFormFixture(); expectTrue(store.save(claim))
+        let file = claim.expenses[0].invoices[0]
+        try FileManager.default.createDirectory(at: store.url(for: file).deletingLastPathComponent(), withIntermediateDirectories: true)
+        try makeTripImportPDF(store.url(for: file), lines: ["演示发票", "金额 ¥69.00"])
+        let view = WorkspaceView().environmentObject(store).defaultAppStorage(defaults).preferredColorScheme(.light).tint(Palette.accent)
+        try captureView(view, width: 1440, height: 1000, to: qa.appendingPathComponent("global-preview-closed.png")) { window, host in
+            @MainActor func snapshot(_ name: String) {
+                host.layoutSubtreeIfNeeded()
+                let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds)!
+                host.cacheDisplay(in: host.bounds, to: bitmap)
+                try? FileManager.default.createDirectory(at: qa, withIntermediateDirectories: true)
+                try? bitmap.representation(using: .png, properties: [:])?.write(to: qa.appendingPathComponent(name))
+            }
+            @MainActor func listBrightness() -> CGFloat {
+                let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds)!
+                host.cacheDisplay(in: host.bounds, to: bitmap)
+                return bitmap.colorAt(x: 580, y: 100)!.usingColorSpace(.deviceRGB)!.redComponent
+            }
+            let before = listBrightness()
+            store.previewTripForm(claim); pumpNativeEvents(0.5)
+            guard let pdf = verificationViews(host, FormPDFView.self).first else { fail("Global trip form missing"); return }
+            let formFrame = host.convert(pdf.bounds, from: pdf)
+            expectTrue(abs(formFrame.midX - host.bounds.midX) < 2)
+            expectTrue(listBrightness() < before - 0.2)
+            snapshot("global-trip-form.png")
+            nativeClick(NSPoint(x: 1190, y: host.isFlipped ? 160 : 840), in: host, window: window)
+            expectNil(store.recordPreview)
+            expectTrue(verificationViews(host, FormPDFView.self).isEmpty)
+            store.previewSummary(claim, personID: claim.personBreakdowns[0].id); pumpNativeEvents(0.4)
+            expectTrue(listBrightness() < before - 0.2)
+            snapshot("global-person-summary.png")
+            nativeClick(NSPoint(x: 1190, y: host.isFlipped ? 160 : 840), in: host, window: window)
+            expectNil(store.recordPreview)
+            store.previewAttachment(file, in: claim); pumpNativeEvents(0.4)
+            guard let canvas = verificationViews(host, AttachmentCanvasView.self).first else { fail("Global attachment missing"); return }
+            expectTrue(abs(host.convert(canvas.bounds, from: canvas).midX - host.bounds.midX) < 2)
+            snapshot("global-attachment.png")
+            nativeClick(NSPoint(x: 1190, y: host.isFlipped ? 160 : 840), in: host, window: window)
+            expectNil(store.preview)
+            store.previewTripForm(claim); pumpNativeEvents()
+            nativeClick(NSPoint(x: 90, y: host.isFlipped ? 350 : 650), in: host, window: window)
+            expectNil(store.recordPreview) // Clicking the left menu area closes the global mask.
+            expectTrue(listBrightness() > before - 0.05)
+        }
+    }
+
+    @MainActor func testSelectableTripFormZoomPanAndCopy() throws {
+        let qa = ProcessInfo.processInfo.environment["REIMBUR_QA_DIR"].map { URL(fileURLWithPath: $0) } ?? temporary!
+        let claim = tripFormFixture(), data = TripFormData(claim: tripFormFixture())
+        let document = TripFormPDF.document(data)!
+        expectEqual(document.pageCount, 1)
+        expectTrue(document.string?.contains("软件部") == true)
+        expectTrue(document.string?.contains("1072.31") == true)
+        expectTrue(document.page(at: 0)!.numberOfCharacters > 100)
+        try FileManager.default.createDirectory(at: qa, withIntermediateDirectories: true)
+        document.write(to: qa.appendingPathComponent("selectable-trip-form.pdf"))
+        let originalCursor = NSEvent.mouseLocation
+        defer { CGWarpMouseCursorPosition(CGPoint(x: originalCursor.x, y: NSScreen.screens[0].frame.maxY - originalCursor.y)) }
+        try captureView(TripFormPreview(claim: claim).background(Palette.canvas).tint(Palette.accent), width: 1000, height: 740,
+                        to: qa.appendingPathComponent("selectable-form-preview.png")) { window, host in
+            guard let pdf = verificationViews(host, FormPDFView.self).first, let page = pdf.document?.page(at: 0),
+                  let word = pdf.document?.findString("软件部", withOptions: []).first else { fail("Selectable PDF text missing"); return }
+            let rect = word.bounds(for: page)
+            let start = pdf.convert(NSPoint(x: rect.minX + 1, y: rect.midY), from: page)
+            let end = pdf.convert(NSPoint(x: rect.maxX - 1, y: rect.midY), from: page)
+            nativeDrag(from: start, to: end, in: pdf, window: window)
+            expectTrue(pdf.currentSelection?.string?.contains("软件") == true)
+            pdf.copy(nil)
+            expectTrue(NSPasteboard.general.string(forType: .string)?.contains("软件") == true)
+            let scale = pdf.scaleFactor
+            let center = NSPoint(x: pdf.bounds.midX, y: pdf.bounds.midY)
+            verificationMovePointer(center, in: pdf, window: window)
+            let scroll = CGEvent(scrollWheelEvent2Source: nil, units: .line, wheelCount: 1, wheel1: 4, wheel2: 0, wheel3: 0)!
+            let screen = window.convertPoint(toScreen: pdf.convert(center, to: nil))
+            scroll.location = CGPoint(x: screen.x, y: NSScreen.screens[0].frame.maxY - screen.y)
+            pdf.scrollWheel(with: NSEvent(cgEvent: scroll)!); pumpNativeEvents(0.3)
+            expectTrue(abs(pdf.scaleFactor - scale) > 0.01)
+            pdf.zoom(by: 2.5, around: center); pumpNativeEvents()
+            let before = pdf.pan
+            for type in [NSEvent.EventType.keyDown] {
+                let key = NSEvent.keyEvent(with: type, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil, characters: " ", charactersIgnoringModifiers: " ", isARepeat: false, keyCode: 49)!
+                NSApplication.shared.postEvent(key, atStart: false)
+            }
+            pumpNativeEvents()
+            nativeDrag(from: center, to: NSPoint(x: center.x - 70, y: center.y - 40), in: pdf, window: window)
+            let up = NSEvent.keyEvent(with: .keyUp, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil, characters: " ", charactersIgnoringModifiers: " ", isARepeat: false, keyCode: 49)!
+            NSApplication.shared.postEvent(up, atStart: false); pumpNativeEvents()
+            expectTrue(hypot(pdf.pan.x - before.x, pdf.pan.y - before.y) > 10)
+            pdf.fitDocument(); pumpNativeEvents()
+            expectTrue(abs(pdf.scaleFactor - scale) < 0.02)
+        }
+    }
+
+    @MainActor func testNativeInvoiceHoverPreviewFollowsAndDismisses() throws {
+        let qa = ProcessInfo.processInfo.environment["REIMBUR_QA_DIR"].map { URL(fileURLWithPath: $0) } ?? temporary!
+        let store = ClaimStore(root: temporary.appendingPathComponent("db"))
+        var claim = Claim.make(.trip); claim.setTravelerNames(["张三"]); claim.expenses = []
+        claim.addExpense(.taxi, unitPrice: 0)
+        let source = temporary.appendingPathComponent("演示发票.pdf"), itinerary = temporary.appendingPathComponent("演示行程单.pdf")
+        try makeTripImportPDF(source, lines: ["电子发票（普通发票）", "发票号码：12345678901234567890", "价税合计 ¥38.00"])
+        try makeTripImportPDF(itinerary, lines: ["打车行程单", "发票号码：12345678901234567890", "杭州至宁波"])
+        claim = try store.importTripFiles([source, itinerary], into: claim, kind: .taxi)
+        let file = claim.expenses[0].invoices[0], trip = claim.expenses[0].itineraries![0]
+        let state = TripListState(claim)
+        let originalCursor = NSEvent.mouseLocation
+        defer { CGWarpMouseCursorPosition(CGPoint(x: originalCursor.x, y: NSScreen.screens[0].frame.maxY - originalCursor.y)) }
+        let view = TripAttachmentsInteractionView(state: state, store: store).overlay { WorkspacePreviewLayer().environmentObject(store) }.tint(Palette.accent)
+        try captureView(view, width: 1250, height: 620, to: qa.appendingPathComponent("invoice-hover.png")) { window, host in
+            let trackers = verificationViews(host, AttachmentHoverTrackingView.self).sorted { host.convert($0.bounds, from: $0).minX < host.convert($1.bounds, from: $1).minX }
+            expectEqual(trackers.count, 2)
+            guard let first = trackers.first, let last = trackers.last else { return }
+            let a = host.convert(NSPoint(x: first.bounds.midX, y: first.bounds.midY), from: first)
+            verificationMovePointer(a, in: host, window: window); pumpNativeEvents(0.8)
+            expectEqual(store.hoverPreview.request?.attachment.id, file.id)
+            expectTrue(store.hoverPreview.visible)
+            expectTrue(store.hoverPreview.image?.isValid == true)
+            guard let canvas = verificationViews(host, AttachmentHoverCanvasView.self).first, let firstFrame = canvas.cardFrame else { fail("Hover canvas not visible"); return }
+            verificationMovePointer(NSPoint(x: a.x + 12, y: a.y + 5), in: host, window: window)
+            if let moved = canvas.cardFrame {
+                expectTrue(abs(moved.minX - firstFrame.minX - 12) < 2)
+                expectTrue(abs(moved.minY - firstFrame.minY - (host.isFlipped ? 5 : -5)) < 2)
+            } else { fail("Moving pointer lost preview") }
+            verificationMovePointer(NSPoint(x: 10, y: 10), in: host, window: window)
+            expectFalse(store.hoverPreview.visible)
+            let b = host.convert(NSPoint(x: last.bounds.midX, y: last.bounds.midY), from: last)
+            verificationMovePointer(a, in: host, window: window)
+            verificationMovePointer(b, in: host, window: window); pumpNativeEvents(0.7)
+            expectEqual(store.hoverPreview.request?.attachment.id, trip.id)
+            expectTrue(store.hoverPreview.visible)
+            store.previewAttachment(file, in: claim); pumpNativeEvents()
+            expectNil(store.hoverPreview.request)
+            store.hoverAttachment(trip, location: b)
+            expectNil(store.hoverPreview.request)
+            store.dismissPreview()
+            verificationMovePointer(NSPoint(x: 10, y: 10), in: host, window: window)
+            verificationMovePointer(a, in: host, window: window); pumpNativeEvents(0.5)
+            expectTrue(store.hoverPreview.visible)
+        }
+        let bounds = CGRect(x: 0, y: 0, width: 1250, height: 620), size = CGSize(width: 320, height: 372)
+        for point in [CGPoint(x: 0, y: 0), CGPoint(x: 1248, y: 0), CGPoint(x: 1248, y: 618), CGPoint(x: 0, y: 618)] {
+            let frame = AttachmentHoverPlacement.frame(cursor: point, size: size, bounds: bounds)
+            expectTrue(bounds.insetBy(dx: 7, dy: 7).contains(frame))
+            expectFalse(frame.contains(point))
+        }
+    }
+
+    @MainActor func testZoomedPreviewsStayInsideViewport() throws {
+        let qa = ProcessInfo.processInfo.environment["REIMBUR_QA_DIR"].map { URL(fileURLWithPath: $0) } ?? temporary!
+        let marker = NSImage(size: NSSize(width: 600, height: 900), flipped: false) { rect in
+            NSColor.systemPink.setFill(); rect.fill(); return true
+        }
+        let png = temporary.appendingPathComponent("预览边界.png")
+        let bitmap = NSBitmapImageRep(data: marker.tiffRepresentation!)!
+        try bitmap.representation(using: .png, properties: [:])!.write(to: png)
+        let pdf = PDFDocument(); pdf.insert(PDFPage(image: marker)!, at: 0)
+        let pdfURL = temporary.appendingPathComponent("预览边界.pdf"); expectTrue(pdf.write(to: pdfURL))
+        @MainActor func capture(_ host: NSView) -> NSBitmapImageRep {
+            host.layoutSubtreeIfNeeded(); host.displayIfNeeded()
+            let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds)!
+            host.cacheDisplay(in: host.bounds, to: bitmap); return bitmap
+        }
+        @MainActor func expectSameHeader(_ before: NSBitmapImageRep, _ after: NSBitmapImageRep) {
+            var changed = 0
+            for x in stride(from: 20, to: before.pixelsWide - 20, by: 10) {
+                for y in stride(from: 10, to: min(48, before.pixelsHigh), by: 5) {
+                    let a = before.colorAt(x: x, y: y)!.usingColorSpace(.deviceRGB)!
+                    let b = after.colorAt(x: x, y: y)!.usingColorSpace(.deviceRGB)!
+                    if abs(a.redComponent - b.redComponent) + abs(a.greenComponent - b.greenComponent) + abs(a.blueComponent - b.blueComponent) > 0.08 { changed += 1 }
+                }
+            }
+            expectEqual(changed, 0)
+        }
+        for source in [png, pdfURL] {
+            let request = PreviewRequest(attachment: Attachment(name: source.lastPathComponent, storedName: source.lastPathComponent), url: source)
+            try captureView(AttachmentPreview(request: request).tint(Palette.accent), width: 1000, height: 740,
+                            to: qa.appendingPathComponent("bounded-\(source.pathExtension)-preview.png")) { window, host in
+                guard let canvas = verificationViews(host, AttachmentCanvasView.self).first else { fail("Attachment canvas missing"); return }
+                let before = capture(host)
+                let center = NSPoint(x: canvas.bounds.midX, y: canvas.bounds.midY)
+                canvas.zoom(by: 8, around: center); pumpNativeEvents()
+                expectTrue(canvas.imageRect.width > canvas.bounds.width)
+                expectTrue(canvas.imageRect.height > canvas.bounds.height)
+                nativeDrag(from: center, to: NSPoint(x: center.x + 140, y: center.y + 100), in: canvas, window: window)
+                expectSameHeader(before, capture(host))
+            }
+        }
+        try captureView(TripFormPreview(claim: tripFormFixture()).background(Palette.canvas), width: 1000, height: 740,
+                        to: qa.appendingPathComponent("bounded-form-preview.png")) { window, host in
+            guard let canvas = verificationViews(host, FormPDFView.self).first else { fail("Form canvas missing"); return }
+            let before = capture(host), center = NSPoint(x: canvas.bounds.midX, y: canvas.bounds.midY)
+            canvas.zoom(by: 8, around: center); pumpNativeEvents()
+            expectTrue(canvas.pageRect.width > canvas.bounds.width)
+            expectSameHeader(before, capture(host))
+        }
+    }
+
+    @MainActor func testManualRouteTextIsPreserved() throws {
+        let store = ClaimStore(root: temporary.appendingPathComponent("manual-route-db"))
+        var claim = Claim.make(.trip); claim.setTravelerNames(["张三"])
+        claim.expenses = [Expense(kind: .train, origin: "杭州东", destination: "宁波", claimant: "张三")]
+        expectTrue(store.save(claim))
+        let state = TripListState(claim)
+        let origin = "杭州东站", destination = " 宁波南站 · 自定义地点 "
+        let qa = ProcessInfo.processInfo.environment["REIMBUR_QA_DIR"].map { URL(fileURLWithPath: $0) } ?? temporary!
+        try captureView(TripListInteractionView(state: state, store: store).tint(Palette.accent), width: 1550, height: 260,
+                        to: qa.appendingPathComponent("manual-route-text.png")) { _, host in
+            for (old, value) in [("杭州", origin), ("宁波", destination)] {
+                guard let picker = verificationViews(host, NSPopUpButton.self).first(where: { $0.titleOfSelectedItem == old }) else { fail("Route picker missing"); return }
+                picker.selectItem(withTitle: "手动输入…")
+                picker.sendAction(picker.action!, to: picker.target); pumpNativeEvents(0.3)
+                let field = NSApplication.shared.windows.filter(\.isVisible).compactMap(\.contentView)
+                    .flatMap { verificationViews($0, NSTextField.self) }.first { $0.placeholderString == "输入地点" }
+                guard let field, let editor = field.currentEditor() as? NSTextView, let window = field.window else { fail("Custom route input not focused"); return }
+                editor.selectAll(nil); editor.insertText(value, replacementRange: NSRange(location: NSNotFound, length: 0))
+                let enter = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                            windowNumber: window.windowNumber, context: nil, characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36)!
+                window.sendEvent(enter); pumpNativeEvents(0.3)
+                expectTrue(verificationViews(host, NSPopUpButton.self).contains { $0.titleOfSelectedItem == value })
+            }
+            expectEqual(state.claim.expenses[0].originCity, origin)
+            expectEqual(state.claim.expenses[0].destinationCity, destination)
+        }
+        claim = ClaimStore(root: store.root).claims.first { $0.id == claim.id }!
+        expectEqual(claim.expenses[0].origin, origin)
+        expectEqual(claim.expenses[0].originCity, origin)
+        expectEqual(claim.expenses[0].destinationCity, destination)
+        expectTrue(ClaimSummary.renderOverview(claim).contains(origin + "-" + destination))
+        let paper = TripFormPaper(data: TripFormData(claim: claim))
+        expectTrue(paper.cells.contains { $0.text == origin })
+        expectTrue(paper.cells.contains { $0.text == destination })
+        expectTrue(TripFormPDF.document(TripFormData(claim: claim))?.string?.contains(origin) == true)
+        // Updating an invoice must not overwrite either manually edited place.
+        let source = temporary.appendingPathComponent("再次导入车票.pdf")
+        try makeTripImportPDF(source, lines: ["电子发票（铁路电子客票）", "发票号码：12345678901234567890", "出发站：上海虹桥", "到达站：济南西站", "票价 ¥69.00"])
+        claim = try store.importFiles([source], into: claim, expenseID: claim.expenses[0].id)
+        expectEqual(claim.expenses[0].originCity, origin)
+        expectEqual(claim.expenses[0].destinationCity, destination)
+        let saved = ClaimStore(root: store.root).claims.first { $0.id == claim.id }!
+        expectEqual(saved.expenses[0].originCity, origin)
+        expectEqual(saved.expenses[0].destinationCity, destination)
+        var oneSide = Expense(kind: .train)
+        oneSide.originCity = "自填起点"
+        oneSide.applyRecognizedRailRoute(RailRoute(origin: "上海虹桥", destination: "杭州西站"))
+        expectEqual(oneSide.originCity, "自填起点")
+        expectEqual(oneSide.destinationCity, "杭州")
+    }
+
+    @MainActor func testRailCitiesInListsFormsAndImports() throws {
+        for (station, city) in [("杭州东站", "杭州"), ("杭州西站", "杭州"), ("宁波站", "宁波"),
+                                (" 上海虹桥火车站 ", "上海"), ("北京南", "北京"), ("济南西站", "济南"),
+                                ("淮南东", "淮南"), ("济南", "济南"), ("淮北", "淮北"), ("呼和浩特东", "呼和浩特"),
+                                ("汉口", "武汉"), ("", ""), ("苏州园区", "苏州"), ("黔东南", "黔东南"), ("未知地点", "未知地点")] {
+            expectEqual(RailCity.name(station), city)
+        }
+        var claim = Claim.make(.trip); claim.setTravelerNames(["张三"])
+        claim.expenses = [Expense(kind: .train, unitPrice: 6900, origin: "杭州东站", destination: "宁波站", claimant: "张三"),
+                          Expense(kind: .train, unitPrice: 8500, origin: "杭州西站", destination: "宁波站", claimant: "张三")]
+        let store = ClaimStore(root: temporary.appendingPathComponent("city-db"))
+        expectTrue(store.save(claim))
+        let legacy = ClaimStore(root: store.root).claims.first { $0.id == claim.id }!
+        expectEqual(legacy.expenses[0].origin, "杭州东站")
+        expectEqual(legacy.expenses[0].originCity, "杭州")
+        expectTrue(ClaimSummary.renderOverview(legacy).contains("杭州-宁波：69.00+85.00=154.00"))
+        let data = TripFormData(claim: legacy)
+        let paper = TripFormPaper(data: data)
+        expectFalse(paper.cells.contains { $0.text == "杭州东站" || $0.text == "杭州西站" || $0.text == "宁波站" })
+        expectTrue(paper.cells.contains { $0.text == "杭州" })
+        let pdf = TripFormPDF.document(data)
+        expectTrue(pdf?.string?.contains("杭州") == true)
+        expectFalse(pdf?.string?.contains("杭州东站") == true)
+        let state = TripListState(legacy)
+        let qa = ProcessInfo.processInfo.environment["REIMBUR_QA_DIR"].map { URL(fileURLWithPath: $0) } ?? temporary!
+        try captureView(TripListInteractionView(state: state, store: store).tint(Palette.accent), width: 1550, height: 330,
+                        to: qa.appendingPathComponent("train-cities.png")) { _, host in
+            let titles = verificationViews(host, NSPopUpButton.self).compactMap(\.titleOfSelectedItem)
+            expectEqual(titles.filter { $0 == "杭州" }.count, 2)
+            expectEqual(titles.filter { $0 == "宁波" }.count, 2)
+            expectFalse(titles.contains("杭州东站"))
+        }
+        let source = temporary.appendingPathComponent("城市车票.pdf")
+        try makeTripImportPDF(source, lines: ["电子发票（铁路电子客票）", "发票号码：12345678901234567890", "出发站：杭州西站", "到达站：宁波站", "票价 ¥69.00"])
+        claim = try store.importTripFiles([source], into: claim, kind: .train)
+        let imported = claim.expenses.last { !$0.invoices.isEmpty }!
+        expectEqual(imported.origin, "杭州")
+        expectEqual(imported.destination, "宁波")
+        expectEqual(ClaimStore(root: store.root).claims.first { $0.id == claim.id }?.expenses.last?.originCity, "杭州")
+        var edited = imported; edited.originCity = "杭州东站"; edited.destinationCity = "济南西站"
+        expectEqual(edited.originCity, "杭州东站"); expectEqual(edited.destinationCity, "济南西站")
+    }
+
+    @MainActor func testRailArrivalDateDefaultsAndOverrides() throws {
+        let store = ClaimStore(root: temporary.appendingPathComponent("db"))
+        var claim = Claim.make(.trip); claim.setTravelerNames(["张三"])
+        let source = temporary.appendingPathComponent("火车票.pdf")
+        try makeTripImportPDF(source, lines: ["电子发票（铁路电子客票）", "发票号码：12345678901234567890", "出发站：杭州东", "到达站：宁波", "乘车日期：2026-11-02 08:30", "票价 ¥69.00"])
+        claim = try store.importTripFiles([source], into: claim, kind: .train)
+        let index = claim.expenses.firstIndex { $0.kind == .train }!
+        expectNil(claim.expenses[index].arrivalTime)
+        expectEqual(claim.expenses[index].effectiveArrivalDate, "2026-11-02")
+        claim.expenses[index].departureTime = "2026-11-03"
+        expectTrue(store.save(claim))
+        claim = ClaimStore(root: store.root).claims.first { $0.id == claim.id }!
+        expectEqual(claim.expenses[index].effectiveArrivalDate, "2026-11-03")
+        var overnight = claim.expenses[index]; overnight.id = UUID()
+        overnight.arrivalTime = "2026-11-04"
+        claim.expenses.insert(overnight, at: index)
+        claim.sortExpenses(.train, column: "arrival", ascending: true)
+        let rows = claim.expenses.filter { $0.kind == .train }
+        expectEqual(rows.map(\.effectiveArrivalDate), ["2026-11-03", "2026-11-04"])
+        expectTrue(store.save(claim))
+        claim = ClaimStore(root: store.root).claims.first { $0.id == claim.id }!
+        let explicit = claim.expenses.firstIndex { $0.id == overnight.id }!
+        claim.expenses[explicit].departureTime = "2026-11-02"
+        expectEqual(claim.expenses[explicit].effectiveArrivalDate, "2026-11-04")
+        expectEqual(TripFormData.momentParts(claim.expenses[explicit].effectiveArrivalDate, place: "宁波"), ["11", "4", "", "宁波"])
+        if let path = ProcessInfo.processInfo.environment["REIMBUR_QA_DIR"] {
+            let state = TripListState(claim)
+            try captureView(TripListInteractionView(state: state, store: store).tint(Palette.accent), width: 1550, height: 300,
+                            to: URL(fileURLWithPath: path).appendingPathComponent("train-arrival-default.png"))
+        }
+        claim.expenses[explicit].arrivalTime = nil
+        expectTrue(store.save(claim))
+        expectEqual(ClaimStore(root: store.root).claims.first { $0.id == claim.id }?.expenses.first { $0.id == overnight.id }?.effectiveArrivalDate, "2026-11-02")
+        var missing = Expense(kind: .train)
+        expectNil(missing.effectiveArrivalDate)
+        missing.departureTime = "2026-11-02 18:30"
+        expectEqual(missing.effectiveArrivalDate, "2026-11-02")
+        missing.kind = .flight
+        expectNil(missing.effectiveArrivalDate)
+    }
+
+    @MainActor func testRailTimesDefaultsAndPersistence() throws {
+        expectEqual(RailTimes.recognize("开票日期：2026-11-02\n乘车日期：2026年10月7日\n开车时间：08:30\n到达时间：2026-10-07 10:35"), RailTimes(departure: "2026-10-07", arrival: "2026-10-07"))
+        expectEqual(RailTimes.recognize("2026年10月07日 08:30开"), RailTimes(departure: "2026-10-07", arrival: nil))
+        expectEqual(RailTimes.recognize("乘车日期：2026-10-07"), RailTimes(departure: "2026-10-07", arrival: nil))
+        expectNil(RailTimes.recognize("开票日期：2026-11-02 12:30\n出发地：杭州东\n目的地：宁波"))
+        expectNil(RailTimes.recognize("出发日期：2026-02-30"))
+        expectNil(RailMoment.date("2026-10-07 25:30"))
+        let suite = "Reimbur-trip-defaults-\(UUID())", defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set("软件部", forKey: "defaultDepartment"); defaults.set("制造项目现场实施", forKey: "defaultTripPurpose")
+        defaults.set(AppPreferences.encodeNames(["张三"]), forKey: "defaultTravelerNames")
+        let store = ClaimStore(root: temporary.appendingPathComponent("db"))
+        let id = store.create(.trip, defaults: ExpenseDefaults.saved(in: defaults))!
+        var claim = store.claims.first { $0.id == id }!
+        expectEqual(claim.department, "软件部"); expectEqual(claim.tripPurpose, "制造项目现场实施")
+        defaults.set("测试部", forKey: "defaultDepartment")
+        expectEqual(store.claims.first { $0.id == id }?.department, "软件部")
+        var files: [URL] = []
+        for (index, day) in ["2026-10-09", "2026-10-07"].enumerated() {
+            let source = temporary.appendingPathComponent("车票\(index).pdf")
+            try makeTripImportPDF(source, lines: ["电子发票（铁路电子客票）", "发票号码：1234567890123456789\(index)", "出发站：杭州东", "到达站：宁波", "乘车日期：\(day) 08:30", "到达时间：\(day) 10:35", "票价 ¥69.00"])
+            files.append(source)
+        }
+        claim = try store.importTripFiles(files, into: claim, kind: .train)
+        let rows = RailMoment.ordered(claim.expenses.filter { $0.kind == .train })
+        expectEqual(rows.map(\.departureTime), ["2026-10-07", "2026-10-09"])
+        expectEqual(rows.map(\.arrivalTime), ["2026-10-07", "2026-10-09"])
+        expectTrue(rows.allSatisfy { $0.origin == "杭州" && $0.destination == "宁波" && $0.invoiceTotal == 6900 })
+        var unknown = Expense(kind: .train); unknown.origin = "未填时间"
+        expectEqual(RailMoment.ordered([unknown] + rows.reversed()).last?.id, unknown.id)
+        var late = rows[0], early = rows[0]; early.id = UUID()
+        late.departureTime = "2026-10-07 18:00"; early.departureTime = "2026-10-07 08:00"
+        expectEqual(RailMoment.dayKey(late.departureTime), "2026-10-07")
+        expectEqual(RailMoment.ordered([late, early]).map(\.id), [late.id, early.id])
+        expectEqual(TripFormData.momentParts(late.departureTime, place: "宁波"), ["10", "7", "", "宁波"])
+        let restored = ClaimStore(root: store.root).claims.first { $0.id == id }!
+        expectEqual(restored.department, claim.department); expectEqual(restored.tripPurpose, claim.tripPurpose)
+        expectEqual(restored.expenses, claim.expenses)
+        var json = try JSONSerialization.jsonObject(with: JSONEncoder().encode(claim)) as! [String: Any]
+        json.removeValue(forKey: "department"); json.removeValue(forKey: "tripPurpose")
+        json["expenses"] = (json["expenses"] as! [[String: Any]]).map { item in
+            var item = item; item.removeValue(forKey: "departureTime"); item.removeValue(forKey: "arrivalTime"); return item
+        }
+        let legacy = try JSONDecoder().decode(Claim.self, from: JSONSerialization.data(withJSONObject: json))
+        expectNil(legacy.department); expectNil(legacy.tripPurpose)
+        expectTrue(legacy.expenses.allSatisfy { $0.departureTime == nil && $0.arrivalTime == nil })
+    }
+
+    private func tripFormFixture() -> Claim {
+        var claim = Claim.make(.trip)
+        claim.title = "宁波项目出差"; claim.department = "软件部"; claim.tripPurpose = "智能制造项目现场实施与调试"
+        claim.setTravelerNames(["张三"])
+        claim.dates = Set([7, 8, 9, 12, 13, 14, 19, 20, 21, 22, 23].map { String(format: "2026-10-%02d", $0) })
+        let days = [7, 9, 12, 14, 19, 23], amounts: [Int64] = [6900, 8500, 6900, 6200, 6900, 6200]
+        claim.expenses = days.enumerated().map { index, day in
+            let date = String(format: "2026-10-%02d", day)
+            return Expense(kind: .train, unitPrice: amounts[index], origin: index % 2 == 0 ? "杭州东" : "宁波", destination: index % 2 == 0 ? "宁波" : "杭州东",
+                           departureTime: date, arrivalTime: date,
+                           invoices: [Attachment(name: "张三车票\(index).pdf", storedName: "demo\(index).pdf", amount: amounts[index], number: "2631200000251784613\(index)")], claimant: "张三")
+        }
+        claim.expenses.append(Expense(kind: .subsidy, unitPrice: 5000, claimant: "张三"))
+        claim.expenses.append(Expense(kind: .taxi, unitPrice: 10631,
+                                      invoices: [Attachment(name: "打车发票.pdf", storedName: "taxi.pdf", amount: 10631)],
+                                      itineraries: [Attachment(name: "行程单.pdf", storedName: "itinerary.pdf", amount: 99999)], claimant: "张三"))
+        claim.expenseOrder = [.train, .subsidy, .taxi]
+        claim.updatedAt = DayKey.date("2026-11-02")!
+        return claim
+    }
+
+    @MainActor func testTripFormReconciliationAndRendering() throws {
+        let qa = ProcessInfo.processInfo.environment["REIMBUR_QA_DIR"].map { URL(fileURLWithPath: $0) } ?? temporary!
+        var claim = tripFormFixture()
+        let data = TripFormData(claim: claim, person: claim.personBreakdowns[0])
+        expectEqual(data.fare, 41600); expectEqual(data.subsidy, 55000); expectEqual(data.otherTotal, 10631)
+        expectEqual(data.total, 107231); expectEqual(data.invoiceCount, 7)
+        expectEqual(data.fare + data.subsidy + data.otherTotal, data.total)
+        expectEqual(data.subsidies, [1: 15000, 3: 15000, 5: 25000])
+        expectEqual(ChineseMoney.uppercase(data.total), "壹仟零柒拾贰元叁角壹分")
+        expectEqual(ChineseMoney.uppercase(10001), "壹佰元零壹分")
+        expectEqual(ChineseMoney.uppercase(100000100), "壹佰万零壹元整")
+        expectEqual(ChineseMoney.uppercase(0), "零元整")
+        expectEqual(TripFormData.momentParts(nil, place: "宁波"), ["", "", "", "宁波"])
+        try captureView(TripFormPaper(data: data), width: TripFormPaper.width, height: TripFormPaper.height(for: data), to: qa.appendingPathComponent("trip-form-paper.png"))
+        claim.travelerNames = ["张三", "李四"]
+        claim.expenses[claim.expenses.count - 1].claimant = "李四"
+        var hotel = Expense(kind: .hotel, claimant: "李四"); hotel.setTotalAmount(20000); claim.expenses.append(hotel)
+        let people = claim.personBreakdowns.map { TripFormData(claim: claim, person: $0) }
+        expectEqual(people.reduce(0) { $0 + $1.total }, claim.total)
+        expectTrue(people.allSatisfy { $0.fare + $0.subsidy + $0.otherTotal == $0.total })
+        expectEqual(people[1].otherTotal, 30631)
+        try captureView(TripFormPreview(claim: claim).background(Palette.canvas).tint(Palette.accent), width: 1000, height: 740, to: qa.appendingPathComponent("trip-form-preview.png")) { window, host in
+            nativeClick(NSPoint(x: 114, y: host.isFlipped ? 74 : host.bounds.height - 74), in: host, window: window)
+        }
+        var many = tripFormFixture(); many.expenses += many.expenses.filter { $0.kind == .train }.map { row in var row = row; row.id = UUID(); return row }
+        many.tripPurpose = String(repeating: "智能制造项目现场实施与调试、", count: 4); many.note = "现场对接，完成测试后返程。"
+        let manyData = TripFormData(claim: many)
+        expectEqual(manyData.rowCount, 12)
+        try captureView(TripFormPaper(data: manyData), width: TripFormPaper.width, height: TripFormPaper.height(for: manyData), to: qa.appendingPathComponent("trip-form-long.png"))
+        var empty = Claim.make(.trip); empty.expenses = []
+        expectEqual(TripFormData(claim: empty).total, 0)
+        expectEqual(TripFormData(claim: empty).rowCount, 7)
+    }
+
+    @MainActor func testTripFormNativeEditorAndTimeSelection() throws {
+        let qa = ProcessInfo.processInfo.environment["REIMBUR_QA_DIR"].map { URL(fileURLWithPath: $0) } ?? temporary!
+        let suite = "Reimbur-trip-ui-\(UUID())", defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = ClaimStore(root: temporary.appendingPathComponent("db"))
+        var claim = tripFormFixture(); claim.expenses.reverse(); expectTrue(store.save(claim))
+        @MainActor func fields(_ view: NSView) -> [NSTextField] { (view as? NSTextField).map { [$0] } ?? view.subviews.flatMap(fields) }
+        @MainActor func edit(_ field: NSTextField, value: String, host: NSView, window: NSWindow) {
+            nativeClick(host.convert(NSPoint(x: field.bounds.midX, y: field.bounds.midY), from: field), in: host, window: window)
+            guard let editor = window.firstResponder as? NSTextView else { fail("New field not editable"); return }
+            editor.selectAll(nil); editor.insertText(value, replacementRange: NSRange(location: NSNotFound, length: 0))
+            window.makeFirstResponder(nil); pumpNativeEvents()
+        }
+        try captureView(SettingsView().environmentObject(store).defaultAppStorage(defaults).textFieldStyle(.roundedBorder).background(Palette.canvas).tint(Palette.accent),
+                        width: 1180, height: 1100, to: qa.appendingPathComponent("trip-default-settings.png")) { window, host in
+            guard let department = fields(host).first(where: { $0.placeholderString == "填写部门" }),
+                  let purpose = fields(host).first(where: { $0.placeholderString == "填写出差事由" }) else { fail("Default fields missing"); return }
+            edit(department, value: "研发部", host: host, window: window)
+            edit(purpose, value: "设备调试", host: host, window: window)
+            expectEqual(ExpenseDefaults.saved(in: defaults).department, "研发部")
+            expectEqual(ExpenseDefaults.saved(in: defaults).tripPurpose, "设备调试")
+        }
+        try captureView(ClaimEditor(claim: claim).overlay { WorkspacePreviewLayer() }.environmentObject(store).defaultAppStorage(defaults).background(Palette.canvas).tint(Palette.accent),
+                        width: 1500, height: 1550, to: qa.appendingPathComponent("trip-editor-form-open.png")) { window, host in
+            guard let department = fields(host).first(where: { $0.placeholderString == "填写部门" }),
+                  let purpose = fields(host).first(where: { $0.placeholderString == "填写出差事由" }) else { fail("Basic info fields missing"); return }
+            edit(department, value: "实施部", host: host, window: window)
+            edit(purpose, value: "客户现场调试", host: host, window: window)
+            expectEqual(store.claims.first { $0.id == claim.id }?.department, "实施部")
+            expectEqual(store.claims.first { $0.id == claim.id }?.tripPurpose, "客户现场调试")
+            @MainActor func cornerBrightness() -> CGFloat {
+                host.layoutSubtreeIfNeeded()
+                let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds)!
+                host.cacheDisplay(in: host.bounds, to: bitmap)
+                return bitmap.colorAt(x: 20, y: 20)!.usingColorSpace(.deviceRGB)!.redComponent
+            }
+            let before = cornerBrightness()
+            nativeClick(NSPoint(x: 1245, y: host.isFlipped ? 892 : host.bounds.height - 892), in: host, window: window)
+            expectTrue(cornerBrightness() < before - 0.2)
+            let overlayBitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds)!
+            host.cacheDisplay(in: host.bounds, to: overlayBitmap)
+            try? FileManager.default.createDirectory(at: qa, withIntermediateDirectories: true)
+            try? overlayBitmap.representation(using: .png, properties: [:])?.write(to: qa.appendingPathComponent("trip-form-overlay.png"))
+            nativeClick(NSPoint(x: 10, y: host.isFlipped ? 50 : host.bounds.height - 50), in: host, window: window)
+            expectTrue(cornerBrightness() > before - 0.05)
+        }
+        let state = TripListState(claim)
+        try captureView(TripListInteractionView(state: state, store: store).defaultAppStorage(defaults).tint(Palette.accent), width: 1550, height: 570,
+                        to: qa.appendingPathComponent("train-times.png")) { window, host in
+            let popups: [NSPopUpButton] = { @MainActor func find(_ node: NSView) -> [NSPopUpButton] { (node as? NSPopUpButton).map { [$0] } ?? node.subviews.flatMap(find) }; return find(host) }()
+            let origins = popups.filter { $0.titleOfSelectedItem == "杭州" || $0.titleOfSelectedItem == "宁波" }
+                .sorted { host.convert($0.bounds, from: $0).minY < host.convert($1.bounds, from: $1).minY }
+            expectEqual(origins.first?.titleOfSelectedItem, "杭州")
+            guard let firstOrigin = origins.first else { fail("Train origin missing"); return }
+            let y = host.convert(firstOrigin.bounds, from: firstOrigin).midY
+            let widths = TripExpenseColumns.widths(for: 1510, kind: .train)
+            let point = NSPoint(x: 20 + widths.prefix(2).reduce(0, +) + widths[2] / 2, y: y)
+            let knownWindows = Set(NSApplication.shared.windows.map(\.windowNumber))
+            nativeClick(point, in: host, window: window)
+            guard let popover = NSApplication.shared.windows.first(where: { $0.isVisible && !knownWindows.contains($0.windowNumber) }), let content = popover.contentView else { fail("Time popover not opened"); return }
+            let popupBitmap = content.bitmapImageRepForCachingDisplay(in: content.bounds)!
+            content.cacheDisplay(in: content.bounds, to: popupBitmap)
+            try? popupBitmap.representation(using: .png, properties: [:])?.write(to: qa.appendingPathComponent("rail-time-popover.png"))
+            nativeClick(NSPoint(x: 54, y: content.isFlipped ? content.bounds.height - 41 : 41), in: content, window: popover)
+            let firstID = RailMoment.ordered(claim.expenses.filter { $0.kind == .train })[0].id
+            expectNil(state.claim.expenses.first { $0.id == firstID }?.departureTime)
+            expectNil(ClaimStore(root: store.root).claims.first { $0.id == claim.id }?.expenses.first { $0.id == firstID }?.departureTime)
+            // Clearing moves the row to the end of the default chronological order.
+            expectEqual(RailMoment.ordered(state.claim.expenses.filter { $0.kind == .train }).last?.id, firstID)
+            let lastY = y + (host.isFlipped ? 1 : -1) * 60 * 5
+            nativeClick(NSPoint(x: point.x, y: lastY), in: host, window: window)
+            guard let activePopover = NSApplication.shared.windows.first(where: { $0.isVisible && $0 !== window && $0.contentView != nil }) else { fail("Blank time popover not opened"); return }
+            let enter = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                        windowNumber: activePopover.windowNumber, context: nil, characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36)!
+            activePopover.sendEvent(enter); pumpNativeEvents()
+            expectEqual(state.claim.expenses.first { $0.id == firstID }?.departureTime, "2026-10-07")
+        }
+    }
+
+    @MainActor func testTripMixedBatchImportAndRollback() throws {
+        let store = ClaimStore(root: temporary.appendingPathComponent("db"))
+        var claim = Claim.make(.trip)
+        claim.setTravelerNames(["张三", "李四"])
+        claim.dates = ["2026-10-28", "2026-10-29"]
+        claim.expenses = []
+        claim.addExpense(.taxi, unitPrice: 0)
+        let emptyRowID = claim.expenses[0].id
+        let a = temporary.appendingPathComponent("发票A.pdf")
+        let b = temporary.appendingPathComponent("发票B.pdf")
+        let itinerary = temporary.appendingPathComponent("混合附件.pdf")
+        let orphan = temporary.appendingPathComponent("未关联行程.pdf")
+        try makeTripImportPDF(a, lines: ["电子发票（普通发票）", "发票号码：12345678901234567890", "订单号：ORDER000001", "价税合计 ¥38.00", "备注：可另附行程单"])
+        try makeTripImportPDF(b, lines: ["电子发票（普通发票）", "发票号码：12345678901234567891", "订单号：ORDER000002", "价税合计 ¥62.00"])
+        try makeTripImportPDF(itinerary, lines: ["高德地图 打车行程单", "订单号：ORDER000002", "发票号码：12345678901234567891", "合计金额 ¥999.00"])
+        try makeTripImportPDF(orphan, lines: ["打车行程单", "订单号：ORDER999999", "合计金额 ¥500.00"])
+        expectEqual(TripImportRecognition.role(text: "电子发票（普通发票）\n备注：另附行程单", filename: "行程单.pdf"), .invoice)
+        expectEqual(TripImportRecognition.role(text: "高德地图 打车 行 程 单\n底部说明：电子发票另附", filename: "附件.pdf"), .itinerary)
+        claim = try store.importTripFiles([itinerary, a, orphan, b], into: claim, kind: .taxi)
+        expectEqual(claim.expenses.count, 3)
+        expectEqual(claim.expenses[0].id, emptyRowID)
+        expectEqual(claim.invoiceCount, 2)
+        expectEqual(claim.invoiceTotal, 10000)
+        expectEqual(claim.total, 10000)
+        expectEqual(claim.expenses.first { $0.invoices.first?.number == "12345678901234567891" }?.itineraries?.count, 1)
+        expectEqual(claim.expenses.filter { $0.invoices.isEmpty }.first?.total(in: claim), 0)
+        expectTrue(claim.expenses.allSatisfy { $0.claimant == "张三" })
+        expectEqual(claim.attachments.count, 4)
+        for file in claim.attachments {
+            expectTrue(file.name.hasPrefix("张三"))
+            expectTrue(FileManager.default.fileExists(atPath: store.url(for: file).path))
+        }
+        let source = claim.expenses.first { $0.invoices.isEmpty }!
+        let target = claim.expenses.first { $0.invoices.first?.number == "12345678901234567890" }!
+        claim = store.moveItinerary(source.itineraries![0], in: claim, from: source.id, to: target.id)!
+        expectEqual(claim.total, 10000)
+        expectEqual(claim.invoiceCount, 2)
+        expectEqual(claim.expenses.first { $0.id == target.id }?.itineraries?.count, 1)
+        // Existing records and original attachments survive a malformed file anywhere in the selection.
+        let before = ClaimStore(root: store.root).claims[0]
+        let bad = temporary.appendingPathComponent("损坏.pdf")
+        try Data("not pdf".utf8).write(to: bad)
+        let directory = store.root.appendingPathComponent("Attachments")
+        let beforeNames = try FileManager.default.contentsOfDirectory(atPath: directory.path).sorted()
+        expectThrowsError(try store.importTripFiles([a, bad], into: claim, kind: .taxi))
+        expectEqual(ClaimStore(root: store.root).claims[0], before)
+        expectEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path).sorted(), beforeNames)
+        // Duplicate imports retain independent rows and unique filenames.
+        claim = try store.importTripFiles([a, a], into: claim, kind: .taxi)
+        expectEqual(claim.invoiceCount, 4)
+        expectEqual(Set(claim.attachments.map(\.name)).count, claim.attachments.count)
+        expectEqual(claim.total, 17600)
+        // A rejected final save also removes copied files rather than resurrecting a deleted record.
+        var deleted = Claim.make(.trip); deleted.expenses = []; deleted.setTravelerNames(["李四"])
+        expectTrue(store.save(deleted)); expectTrue(store.delete(deleted))
+        let savedNames = try FileManager.default.contentsOfDirectory(atPath: directory.path).sorted()
+        expectThrowsError(try store.importTripFiles([a, b], into: deleted, kind: .taxi))
+        expectEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path).sorted(), savedNames)
+        expectFalse(store.claims.contains { $0.id == deleted.id })
+        // Trains remain one row per file, even for multi-page PDFs, with route and amount recognition.
+        var rail = Claim.make(.trip); rail.expenses = []; rail.setTravelerNames(["张三"])
+        let ticket = temporary.appendingPathComponent("车票.pdf")
+        try makePDF(at: ticket, pages: 2, number: "22345678901234567890", amount: "553.00")
+        rail = try store.importTripFiles([ticket, ticket], into: rail, kind: .train)
+        expectEqual(rail.expenses.count, 2)
+        expectEqual(rail.invoiceCount, 2)
+        expectEqual(rail.total, 110600)
+        expectTrue(rail.expenses.allSatisfy { $0.origin == "上海" && $0.destination == "杭州" && $0.invoices[0].pageCount == 2 })
+        // A scanned itinerary uses local OCR, while image itineraries remain outside invoice totals.
+        let pdf = PDFDocument(url: itinerary)!
+        let image = pdf.page(at: 0)!.thumbnail(of: NSSize(width: 1190, height: 1684), for: .mediaBox)
+        let scan = temporary.appendingPathComponent("扫描附件.pdf")
+        let scanned = PDFDocument(); scanned.insert(PDFPage(image: image)!, at: 0)
+        expectTrue(scanned.write(to: scan))
+        expectEqual(try TripImportRecognition.inspect(scan, kind: .taxi).role, .itinerary)
+        let photo = temporary.appendingPathComponent("行程截图.png")
+        try NSBitmapImageRep(data: image.tiffRepresentation!)!.representation(using: .png, properties: [:])!.write(to: photo)
+        let count = claim.invoiceCount, total = claim.total
+        claim = try store.importTripFiles([scan, photo], into: claim, kind: .taxi)
+        expectEqual(claim.invoiceCount, count)
+        expectEqual(claim.total, total)
+        expectEqual(ClaimStore(root: store.root).claims.first { $0.id == claim.id }?.expenses, claim.expenses)
+    }
+
+    @MainActor func testTripListNativeEditingAndScreenshots() throws {
+        let qa = ProcessInfo.processInfo.environment["REIMBUR_QA_DIR"].map { URL(fileURLWithPath: $0) } ?? temporary!
+        let store = ClaimStore(root: temporary.appendingPathComponent("db"))
+        var claim = sampleClaim()
+        claim.expenses = [Expense(kind: .train, unitPrice: 55300, origin: "上海虹桥", destination: "杭州东", claimant: "张三"),
+                          Expense(kind: .train, unitPrice: 28000, origin: "杭州东", destination: "上海虹桥", claimant: "李四")]
+        claim.expenses[0].note = "保留历史说明"
+        claim.expenses[0].invoices = [Attachment(name: "车票A.pdf", storedName: "a.pdf", amount: 30000, number: "12345678901234567890"),
+                                      Attachment(name: "车票B.pdf", storedName: "b.pdf", amount: 25300, number: "12345678901234567891")]
+        claim.expenses[1].invoices = [Attachment(name: "车票C.pdf", storedName: "c.pdf", amount: 28000, number: "12345678901234567892")]
+        expectTrue(store.save(claim))
+        for invoice in claim.expenses.flatMap(\.invoices) {
+            try makePDF(at: store.url(for: invoice), pages: 1, number: invoice.number ?? "", amount: Money.input(invoice.amount))
+        }
+        let state = TripListState(claim)
+        let view = TripListInteractionView(state: state, store: store).tint(Palette.accent)
+        try captureView(view, width: 1450, height: 310, to: qa.appendingPathComponent("trip-list-edited.png")) { window, host in
+            @MainActor func fields(_ view: NSView) -> [NSTextField] { (view as? NSTextField).map { [$0] } ?? view.subviews.flatMap(fields) }
+            @MainActor func edit(_ field: NSTextField, _ value: String) {
+                nativeClick(host.convert(NSPoint(x: field.bounds.midX, y: field.bounds.midY), from: field), in: host, window: window)
+                guard let editor = window.firstResponder as? NSTextView else { fail("Trip cell not editable"); return }
+                editor.selectAll(nil); editor.insertText(value, replacementRange: NSRange(location: NSNotFound, length: 0))
+                window.makeFirstResponder(nil); pumpNativeEvents()
+            }
+            @MainActor func popups(_ view: NSView) -> [NSPopUpButton] { (view as? NSPopUpButton).map { [$0] } ?? view.subviews.flatMap(popups) }
+            expectFalse(fields(host).contains { $0.placeholderString == "选填说明" })
+            expectEqual(fields(host).filter { $0.placeholderString == "发票号码" }.count, 3)
+            guard let invoiceNumber = fields(host).first(where: { $0.stringValue == "12345678901234567890" }),
+                  let origin = popups(host).first(where: { $0.titleOfSelectedItem == "上海" }) else { fail("Trip list cells missing"); return }
+            edit(invoiceNumber, "22345678901234567890")
+            edit(fields(host).first(where: { $0.stringValue == "300.00" })!, "310.00")
+            expectEqual(state.claim.total, 84300)
+            expectEqual(state.claim.invoiceTotal, 84300)
+            expectFalse(fields(host).contains { $0.stringValue == "553.00" })
+            let freshNumber = fields(host).first { $0.stringValue == "22345678901234567890" }!
+            let numberRect = host.convert(freshNumber.bounds, from: freshNumber)
+            let fileWidth = TripExpenseColumns.widths(for: 1410, kind: .train)[7]
+            nativeClick(nativeFilePreviewPoint(state.claim.expenses[0].invoices[0].name, columnStart: numberRect.maxX + 10, columnWidth: fileWidth, y: numberRect.midY), in: host, window: window)
+            expectEqual(store.preview?.attachment.id, state.claim.expenses[0].invoices[0].id)
+            origin.selectItem(withTitle: "手动输入…")
+            origin.sendAction(origin.action!, to: origin.target); pumpNativeEvents()
+            let customField = NSApplication.shared.windows.compactMap(\.contentView).flatMap(fields).first { $0.placeholderString == "输入地点" }
+            if let field = customField, let editor = field.currentEditor() as? NSTextView {
+                editor.selectAll(nil); editor.insertText("上海南", replacementRange: NSRange(location: NSNotFound, length: 0))
+                let enter = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: field.window!.windowNumber, context: nil, characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36)!
+                field.window!.sendEvent(enter); pumpNativeEvents()
+            } else { fail("Custom station field not focused") }
+            expectEqual(state.claim.expenses[0].note, "保留历史说明")
+            expectEqual(state.claim.expenses[0].invoices[0].number, "22345678901234567890")
+            expectEqual(state.claim.expenses[0].total(in: state.claim), 56300)
+            expectEqual(state.claim.expenses[0].origin, "上海南")
+            expectEqual(state.claim.total, 84300)
+            expectEqual(store.claims.first { $0.id == claim.id }?.expenses, state.claim.expenses)
+        }
+        var demo = sampleClaim()
+        demo.title = "杭州项目出差"; demo.status = .pending
+        for i in 0..<4 {
+            let amount = Int64(21000 + i * 2500)
+            let invoice = Attachment(name: "张三车票\(i).pdf", storedName: "demo\(i).pdf", amount: amount, number: "2631200000251784613\(i)")
+            let origin = i % 2 == 0 ? "杭州东" : "上海虹桥"
+            let destination = i % 2 == 0 ? "上海虹桥" : "杭州东"
+            demo.expenses.append(Expense(kind: .train, unitPrice: amount, origin: origin, destination: destination,
+                                         note: "项目往返交通", invoices: [invoice], claimant: i % 2 == 0 ? "张三" : "李四"))
+        }
+        demo.expenseOrder = [.train, .subsidy, .hotel]
+        expectTrue(store.save(demo))
+        try captureView(ClaimEditor(claim: demo).environmentObject(store).background(Palette.canvas).tint(Palette.accent), width: 1500, height: 1700,
+                        to: qa.appendingPathComponent("trip-expenses.png"))
+        var meal = Claim.make(.meal); meal.title = "十月餐补报销"; meal.status = .archived
+        meal.setTravelerNames(["张三"]); meal.dates = ["2026-10-26", "2026-10-27", "2026-10-28", "2026-10-29"]
+        meal.expenses[0].unitPrice = 3000
+        for i in 1...3 {
+            let pdf = temporary.appendingPathComponent("餐补发票\(i).pdf")
+            try makePDF(at: pdf, pages: 1, number: "2631200000251784613\(i)", amount: "38.00")
+            meal = try store.importFiles([pdf], into: meal, expenseID: meal.expenses[0].id)
+            meal.invoiceLedgerEntries?[i - 1].detail = "工作日餐费"
+        }
+        expectTrue(store.save(meal))
+        try captureView(ClaimEditor(claim: meal).environmentObject(store).background(Palette.canvas).tint(Palette.accent), width: 1500, height: 1120, to: qa.appendingPathComponent("meal-ledger.png"))
+    }
+
+    @MainActor func testTaxiAttachmentDisclosure() throws {
+        let qa = ProcessInfo.processInfo.environment["REIMBUR_QA_DIR"].map { URL(fileURLWithPath: $0) } ?? temporary!
+        let store = ClaimStore(root: temporary.appendingPathComponent("db"))
+        var claim = Claim.make(.trip); claim.expenses = []; claim.setTravelerNames(["张三"])
+        let invoice = temporary.appendingPathComponent("打车发票.pdf")
+        let itinerary = temporary.appendingPathComponent("关联行程单.pdf")
+        try makeTripImportPDF(invoice, lines: ["电子发票（普通发票）", "发票号码：12345678901234567890", "订单号：ORDER000001", "价税合计 ¥38.00"])
+        try makeTripImportPDF(itinerary, lines: ["高德地图 打车行程单", "订单号：ORDER000001", "发票号码：12345678901234567890"])
+        claim = try store.importTripFiles([invoice, itinerary], into: claim, kind: .taxi)
+        let state = TripListState(claim)
+        let view = TripAttachmentsInteractionView(state: state, store: store).tint(Palette.accent)
+        try captureView(view, width: 1250, height: 330, to: qa.appendingPathComponent("taxi-columns.png")) { window, host in
+            @MainActor func fields(_ view: NSView) -> [NSTextField] { (view as? NSTextField).map { [$0] } ?? view.subviews.flatMap(fields) }
+            guard let number = fields(host).first(where: { $0.placeholderString == "发票号码" }) else { fail("Taxi invoice number missing"); return }
+            let rect = host.convert(number.bounds, from: number)
+            let widths = TripExpenseColumns.widths(for: 1170, kind: .taxi)
+            // The itinerary is a first-class cell beside the invoice, with its own preview.
+            nativeClick(nativeFilePreviewPoint(state.claim.expenses[0].itineraries![0].name, columnStart: rect.maxX + 10 + widths[3], columnWidth: widths[4], y: rect.midY), in: host, window: window)
+            expectEqual(store.preview?.attachment.id, state.claim.expenses[0].itineraries?.first?.id)
+            expectEqual(state.claim.invoiceCount, 1)
+            expectEqual(state.claim.total, 3800)
+            expectEqual(state.claim.expenses[0].itineraries?.count, 1)
+        }
+    }
+
+    @MainActor func testInlineLedgerFilesAndSubsidyColumns() throws {
+        let qa = ProcessInfo.processInfo.environment["REIMBUR_QA_DIR"].map { URL(fileURLWithPath: $0) } ?? temporary!
+        let store = ClaimStore(root: temporary.appendingPathComponent("db"))
+        @MainActor func fields(_ view: NSView) -> [NSTextField] { (view as? NSTextField).map { [$0] } ?? view.subviews.flatMap(fields) }
+        @MainActor func edit(_ field: NSTextField, _ value: String, host: NSView, window: NSWindow) {
+            nativeClick(host.convert(NSPoint(x: field.bounds.midX, y: field.bounds.midY), from: field), in: host, window: window)
+            guard let editor = window.firstResponder as? NSTextView else { fail("Inline cell not editable"); return }
+            editor.selectAll(nil); editor.insertText(value, replacementRange: NSRange(location: NSNotFound, length: 0))
+            window.makeFirstResponder(nil); pumpNativeEvents()
+        }
+        for kind in [ClaimKind.meal, .allowance] {
+            var claim = Claim.make(kind); claim.setTravelerNames(["张三"])
+            claim.dates = ["2026-10-28", "2026-10-29"]
+            claim.expenses[0].unitPrice = 3000
+            if kind == .allowance { claim.allowanceAmount = 68000; claim.reimbursementPurpose = "电脑配件" }
+            let pdf = temporary.appendingPathComponent("测试发票.pdf")
+            try makePDF(at: pdf, pages: 1, number: "26337000000777118119", amount: "241.00")
+            claim = try store.importFiles([pdf], into: claim, expenseID: claim.expenses[0].id)
+            let state = TripListState(claim)
+            let originalTotal = claim.total
+            let view = InlineLedgerInteractionView(state: state, store: store).tint(Palette.accent)
+            try captureView(view, width: 1300, height: 330, to: qa.appendingPathComponent("inline-\(kind.rawValue).png")) { window, host in
+                guard let number = fields(host).first(where: { $0.placeholderString == "发票号码" }),
+                      fields(host).contains(where: { $0.stringValue == "241.00" }) else {
+                    fail("Inline ledger invoice fields missing"); return
+                }
+                expectEqual(fields(host).filter { $0.stringValue == "241.00" }.count, 2)
+                let rect = host.convert(number.bounds, from: number)
+                let fileWidth = InvoiceLedgerColumns.widths(for: 1220)[4]
+                nativeClick(nativeFilePreviewPoint(state.claim.invoiceLedgerRows[0].invoice!.name, columnStart: rect.maxX + 10, columnWidth: fileWidth, y: rect.midY), in: host, window: window)
+                expectEqual(store.preview?.attachment.id, state.claim.invoiceLedgerRows[0].invoice?.id)
+                if let preview = store.preview { expectTrue(PDFDocument(url: preview.url) != nil) }
+                else { fail("Preview request missing") }
+                let currentAmount = fields(host).filter { $0.stringValue == "241.00" }.min { host.convert($0.bounds, from: $0).midX < host.convert($1.bounds, from: $1).midX }!
+                edit(currentAmount, "250.00", host: host, window: window)
+                expectEqual(state.claim.invoiceTotal, 25000)
+                expectEqual(state.claim.total, originalTotal)
+                expectEqual(state.claim.ledgerReimbursementTotal, 24100)
+                nativeClick(NSPoint(x: rect.maxX + 10 + fileWidth / 2 + 15, y: rect.midY), in: host, window: window)
+                guard let name = fields(host).first(where: { $0.placeholderString == "附件名称" }) else { fail("Inline filename editor missing"); return }
+                edit(name, "核对发票", host: host, window: window)
+                expectEqual(state.claim.invoiceLedgerRows[0].invoice?.name, "核对发票.pdf")
+                let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds)!
+                host.cacheDisplay(in: host.bounds, to: bitmap)
+                try? bitmap.representation(using: .png, properties: [:])?.write(to: qa.appendingPathComponent("inline-\(kind.rawValue)-with-invoice.png"))
+                // The row's delete control removes its invoice and linked ledger entry immediately.
+                let deleteX: CGFloat = 1300 - 40 - 26
+                nativeClick(NSPoint(x: deleteX, y: rect.midY), in: host, window: window)
+                expectEqual(state.claim.invoiceCount, 0)
+                expectEqual(state.claim.invoiceLedgerRows.count, 0)
+                expectEqual(state.claim.total, originalTotal)
+                expectEqual(store.claims.first { $0.id == state.claim.id }?.invoiceCount, 0)
+            }
+        }
+        var trip = Claim.make(.trip); trip.setTravelerNames(["张三", "李四"])
+        trip.dates = ["2026-10-27", "2026-10-28", "2026-10-29"]
+        trip.expenses = [Expense(kind: .subsidy, unitPrice: 10000, dates: ["2026-10-28", "2026-10-29"], claimant: "张三"),
+                         Expense(kind: .subsidy, unitPrice: 10000, claimant: "李四")]
+        let state = TripListState(trip)
+        try captureView(SubsidyListInteractionView(state: state).tint(Palette.accent), width: 1050, height: 260, to: qa.appendingPathComponent("subsidy-columns.png")) { window, host in
+            expectEqual(fields(host).filter { $0.placeholderString == "发票号码" }.count, 0)
+            let prices = fields(host).filter { $0.stringValue == "100.00" }
+            expectEqual(prices.count, 2)
+            if let price = prices.first { edit(price, "120.00", host: host, window: window) }
+            expectEqual(state.claim.total, 54000)
+        }
+    }
+
+    @MainActor func testHoverSortingCenteredCellsAndOverlayScrollbar() throws {
+        let qa = ProcessInfo.processInfo.environment["REIMBUR_QA_DIR"].map { URL(fileURLWithPath: $0) } ?? temporary!
+        let suite = "Reimbur-hover-table-\(UUID())", defaults: UserDefaults
+        defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let originalCursor = NSEvent.mouseLocation
+        defer { CGWarpMouseCursorPosition(CGPoint(x: originalCursor.x, y: NSScreen.screens[0].frame.maxY - originalCursor.y)) }
+        let store = ClaimStore(root: temporary.appendingPathComponent("db"))
+        @MainActor func fields(_ view: NSView) -> [NSTextField] { (view as? NSTextField).map { [$0] } ?? view.subviews.flatMap(fields) }
+        @MainActor func popups(_ view: NSView) -> [NSPopUpButton] { (view as? NSPopUpButton).map { [$0] } ?? view.subviews.flatMap(popups) }
+        @MainActor func scrolls(_ view: NSView) -> [NSScrollView] { (view as? NSScrollView).map { [$0] } ?? view.subviews.flatMap(scrolls) }
+        @MainActor func move(_ point: NSPoint, _ host: NSView, _ window: NSWindow) {
+            window.acceptsMouseMovedEvents = true
+            let screenPoint = window.convertPoint(toScreen: host.convert(point, to: nil))
+            let globalPoint = CGPoint(x: screenPoint.x, y: NSScreen.screens[0].frame.maxY - screenPoint.y)
+            CGWarpMouseCursorPosition(globalPoint)
+            CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: globalPoint, mouseButton: .left)?.post(tap: .cghidEventTap)
+            let event = NSEvent.mouseEvent(with: .mouseMoved, location: host.convert(point, to: nil), modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                          windowNumber: window.windowNumber, context: nil, eventNumber: 5, clickCount: 0, pressure: 0)!
+            NSApplication.shared.postEvent(event, atStart: false); pumpNativeEvents(0.3)
+        }
+        @MainActor func snapshot(_ host: NSView, _ name: String) {
+            host.layoutSubtreeIfNeeded()
+            let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds)!
+            host.cacheDisplay(in: host.bounds, to: bitmap)
+            try? FileManager.default.createDirectory(at: qa, withIntermediateDirectories: true)
+            try? bitmap.representation(using: .png, properties: [:])?.write(to: qa.appendingPathComponent(name))
+        }
+        var trip = Claim.make(.trip); trip.setTravelerNames(["张三", "李四"])
+        trip.dates = ["2026-10-28", "2026-10-29"]
+        trip.expenses = [Expense(kind: .subsidy, unitPrice: 8000, note: "原始第一笔", claimant: "张三"),
+                         Expense(kind: .subsidy, unitPrice: 5000, note: "原始第二笔", claimant: "李四"),
+                         Expense(kind: .subsidy, unitPrice: 10000, note: "原始第三笔", claimant: "张三")]
+        expectTrue(store.save(trip))
+        let originalIDs = trip.expenses.map(\.id), state = TripListState(trip)
+        let view = AdjustableTripInteractionView(state: state, store: store, kind: .subsidy).tint(Palette.accent).defaultAppStorage(defaults)
+        try captureView(view, width: 1050, height: 350, to: qa.appendingPathComponent("subsidy-default.png")) { window, host in
+            let scroll = scrolls(host)[0]
+            expectTrue(abs(scroll.frame.height - 222) < 1)
+            expectTrue(abs((scroll.documentView?.frame.width ?? 0) - scroll.contentView.bounds.width) < 1)
+            expectTrue(fields(host).filter(\.isEditable).allSatisfy { $0.alignment == .center })
+            expectTrue(popups(host).allSatisfy { $0.alignment == .center })
+            let price = fields(host).first { $0.stringValue == "80.00" }!
+            let rect = host.convert(price.bounds, from: price), sign: CGFloat = host.isFlipped ? 1 : -1
+            let widths = TripExpenseColumns.widths(for: 1010, kind: .subsidy)
+            let header = NSPoint(x: 20 + widths.prefix(3).reduce(0, +) + widths[3] / 2, y: rect.midY - sign * 51)
+            move(NSPoint(x: 10, y: 10), host, window); snapshot(host, "header-hidden.png")
+            move(header, host, window); snapshot(host, "header-hover-default.png")
+            expectTrue((try? Data(contentsOf: qa.appendingPathComponent("header-hidden.png"))) != (try? Data(contentsOf: qa.appendingPathComponent("header-hover-default.png"))))
+            @MainActor func headerSlice(_ file: String, column: Int) -> Data? {
+                guard let data = try? Data(contentsOf: qa.appendingPathComponent(file)), let image = NSBitmapImageRep(data: data)?.cgImage else { return nil }
+                let scale = CGFloat(image.width) / host.bounds.width
+                let top = host.isFlipped ? header.y - 21 : host.bounds.height - header.y - 21
+                let area = CGRect(x: (20 + widths.prefix(column).reduce(0, +)) * scale, y: top * scale, width: widths[column] * scale, height: 42 * scale)
+                guard let slice = image.cropping(to: area) else { return nil }
+                return NSBitmapImageRep(cgImage: slice).representation(using: .png, properties: [:])
+            }
+            for index in 0..<6 where index != 3 {
+                expectEqual(headerSlice("header-hidden.png", column: index), headerSlice("header-hover-default.png", column: index))
+            }
+            nativeClick(header, in: host, window: window)
+            expectEqual(state.claim.expenses.map(\.unitPrice), [5000, 8000, 10000]); snapshot(host, "header-ascending.png")
+            expectTrue(headerSlice("header-hover-default.png", column: 3) != headerSlice("header-ascending.png", column: 3))
+            nativeClick(header, in: host, window: window)
+            expectEqual(state.claim.expenses.map(\.unitPrice), [10000, 8000, 5000]); snapshot(host, "header-descending.png")
+            nativeClick(header, in: host, window: window)
+            expectEqual(state.claim.expenses.map(\.id), originalIDs)
+            move(NSPoint(x: 10, y: 10), host, window)
+        }
+        // Restoring the baseline still works after reopening, with added/deleted rows.
+        var reloaded = ClaimStore(root: store.root).claims.first { $0.id == trip.id }!
+        reloaded.sortExpenses(.subsidy, column: "price", ascending: true)
+        let newExpense = Expense(kind: .subsidy, unitPrice: 6000, claimant: "张三")
+        reloaded.expenses.append(newExpense); reloaded.expenses.removeAll { $0.id == originalIDs[1] }
+        expectTrue(store.save(reloaded))
+        reloaded = ClaimStore(root: store.root).claims.first { $0.id == trip.id }!
+        reloaded.sortExpenses(.subsidy, column: "price", ascending: nil)
+        expectEqual(reloaded.expenses.map(\.id), [originalIDs[0], originalIDs[2], newExpense.id])
+        for kind in [ClaimKind.meal, .allowance] {
+            var claim = Claim.make(kind); claim.setTravelerNames(["张三"])
+            if kind == .allowance { claim.allowanceAmount = 50000; claim.reimbursementPurpose = "办公配件" }
+            let expenseID = claim.expenses[0].id
+            claim.expenses[0].invoices = [Attachment(name: "张三发票A.pdf", storedName: "a.pdf", amount: 3800, number: "12345678901234567890"),
+                                          Attachment(name: "张三发票B.pdf", storedName: "b.pdf", amount: 2400, number: "12345678901234567891")]
+            claim.invoiceLedgerEntries = claim.expenses[0].invoices.map {
+                InvoiceLedgerEntry(id: $0.id, expenseID: expenseID, invoiceID: $0.id, date: "2026-10-29", claimant: "张三", reimbursementAmount: $0.amount, detail: "工作餐")
+            }
+            expectTrue(store.save(claim))
+            let ledgerState = TripListState(claim), baseline = claim.invoiceLedgerRows.map(\.id)
+            let ledger = InlineLedgerInteractionView(state: ledgerState, store: store).tint(Palette.accent).defaultAppStorage(defaults)
+            try captureView(ledger, width: 1550, height: 470, to: qa.appendingPathComponent("ledger-\(kind.rawValue).png")) { window, host in
+                expectTrue(fields(host).filter(\.isEditable).allSatisfy { $0.alignment == .center })
+                let amount = fields(host).first { $0.stringValue == "38.00" }!
+                let rect = host.convert(amount.bounds, from: amount), sign: CGFloat = host.isFlipped ? 1 : -1
+                let widths = InvoiceLedgerColumns.widths(for: 1470)
+                let header = NSPoint(x: 40 + widths.prefix(5).reduce(0, +) + widths[5] / 2, y: rect.midY - sign * 51)
+                nativeClick(header, in: host, window: window)
+                expectEqual(ledgerState.claim.invoiceLedgerRows.map { $0.invoice?.amount }, [2400, 3800])
+                nativeClick(header, in: host, window: window)
+                expectEqual(ledgerState.claim.invoiceLedgerRows.map { $0.invoice?.amount }, [3800, 2400])
+                nativeClick(header, in: host, window: window)
+                expectEqual(ledgerState.claim.invoiceLedgerRows.map(\.id), baseline)
+                var saved = ClaimStore(root: store.root).claims.first { $0.id == claim.id }!
+                saved.sortLedgerRows(column: "amount", ascending: true); expectTrue(store.save(saved))
+                saved = ClaimStore(root: store.root).claims.first { $0.id == claim.id }!
+                saved.sortLedgerRows(column: "amount", ascending: nil)
+                expectEqual(saved.invoiceLedgerRows.map(\.id), baseline)
+                expectEqual(saved.expenses[0].invoices.map(\.id), claim.expenses[0].invoices.map(\.id))
+                move(NSPoint(x: 10, y: 10), host, window)
+            }
+            if kind == .meal {
+                try captureView(ledger, width: 950, height: 470, to: qa.appendingPathComponent("scrollbar-hidden.png")) { window, host in
+                    let scroll = scrolls(host)[0], rect = host.convert(scroll.bounds, from: scroll)
+                    expectTrue((scroll.documentView?.frame.width ?? 0) > scroll.contentView.bounds.width)
+                    expectTrue(abs(scroll.frame.height - 162) < 1)
+                    let point = NSPoint(x: rect.midX, y: host.isFlipped ? rect.maxY + 6 : rect.minY - 6)
+                    move(NSPoint(x: 10, y: 10), host, window); snapshot(host, "scrollbar-before-hover.png")
+                    move(point, host, window); snapshot(host, "scrollbar-hover.png")
+                    expectTrue((try? Data(contentsOf: qa.appendingPathComponent("scrollbar-before-hover.png"))) != (try? Data(contentsOf: qa.appendingPathComponent("scrollbar-hover.png"))))
+                    move(NSPoint(x: 10, y: 10), host, window); snapshot(host, "scrollbar-after-leave.png")
+                    expectEqual(try? Data(contentsOf: qa.appendingPathComponent("scrollbar-before-hover.png")), try? Data(contentsOf: qa.appendingPathComponent("scrollbar-after-leave.png")))
+                    move(point, host, window)
+                    nativeDrag(from: point, to: NSPoint(x: point.x + 80, y: point.y), in: host, window: window)
+                    expectTrue(scroll.contentView.bounds.minX > 50)
+                    move(NSPoint(x: 10, y: 10), host, window)
+                }
+            }
+        }
+        var train = trip; train.expenses = [Expense(kind: .train, unitPrice: 24100, origin: "上海虹桥", destination: "杭州东", invoices: [Attachment(name: "张三火车电子发票.pdf", storedName: "demo.pdf", amount: 24100, number: "26337000000777118119")], claimant: "张三")]
+        expectTrue(store.save(train))
+        try makePDF(at: store.url(for: train.expenses[0].invoices[0]), pages: 1, number: "26337000000777118119", amount: "241.00")
+        let trainState = TripListState(train)
+        try captureView(AdjustableTripInteractionView(state: trainState, store: store, kind: .train).tint(Palette.accent).defaultAppStorage(defaults),
+                        width: 1350, height: 250, to: qa.appendingPathComponent("train-centered.png")) { window, host in
+            let widths = TripExpenseColumns.widths(for: 1310, kind: .train)
+            let amount = fields(host).first { $0.stringValue == "241.00" }!
+            let rect = host.convert(amount.bounds, from: amount)
+            nativeClick(nativeFilePreviewPoint(trainState.claim.expenses[0].invoices[0].name, columnStart: 20 + widths.prefix(5).reduce(0, +), columnWidth: widths[5], y: rect.midY), in: host, window: window)
+            expectEqual(store.preview?.attachment.id, trainState.claim.expenses[0].invoices[0].id)
+        }
+        var taxi = train
+        taxi.expenses[0].kind = .taxi
+        taxi.expenses[0].itineraries = [Attachment(name: "张三打车行程单.pdf", storedName: "itinerary.pdf", amount: 0)]
+        try captureView(AdjustableTripInteractionView(state: TripListState(taxi), store: store, kind: .taxi).tint(Palette.accent).defaultAppStorage(defaults),
+                        width: 1350, height: 250, to: qa.appendingPathComponent("taxi-centered.png"))
+    }
+
+    @MainActor func testCenteredTablesAdjacentResizeAndSorting() throws {
+        let qa = ProcessInfo.processInfo.environment["REIMBUR_QA_DIR"].map { URL(fileURLWithPath: $0) } ?? temporary!
+        let suite = "Reimbur-table-\(UUID())"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = ClaimStore(root: temporary.appendingPathComponent("db"))
+        var claim = Claim.make(.trip); claim.setTravelerNames(["孙毅强", "张三"])
+        claim.dates = ["2026-10-28", "2026-10-29"]
+        claim.expenses = [Expense(kind: .subsidy, unitPrice: 8000, note: "待编辑备注", claimant: "孙毅强"), Expense(kind: .subsidy, unitPrice: 5000, note: "第二笔", claimant: "张三")]
+        expectTrue(store.save(claim))
+        let firstID = claim.expenses[0].id
+        let state = TripListState(claim)
+        @MainActor func fields(_ view: NSView) -> [NSTextField] { (view as? NSTextField).map { [$0] } ?? view.subviews.flatMap(fields) }
+        @MainActor func scrolls(_ view: NSView) -> [NSScrollView] { (view as? NSScrollView).map { [$0] } ?? view.subviews.flatMap(scrolls) }
+        let columns = TripExpenseColumns.columns(for: .subsidy)
+        let widths = TripExpenseColumns.widths(for: 1010, kind: .subsidy)
+        let direct = ReimbursementColumnSizing.resize(widths, columns: columns, left: 4, delta: 40)
+        expectEqual(direct[4], widths[4] + 40); expectEqual(direct[5], widths[5] - 40)
+        for index in [0, 1, 2, 3, 6] { expectEqual(direct[index], widths[index]) }
+        expectEqual(direct.reduce(0, +), widths.reduce(0, +))
+        expectEqual(ReimbursementColumnSizing.resize(widths, columns: columns, left: 5, delta: 500), widths)
+        let bounded = ReimbursementColumnSizing.resize(widths, columns: columns, left: 4, delta: 500, maximumDelta: 12)
+        expectEqual(bounded[4], widths[4] + 12)
+        let view = AdjustableTripInteractionView(state: state, store: store, kind: .subsidy).tint(Palette.accent).defaultAppStorage(defaults)
+        try captureView(view, width: 1050, height: 300, to: qa.appendingPathComponent("table-subsidy-resized.png")) { window, host in
+            guard let price = fields(host).first(where: { $0.stringValue == "80.00" }) else { fail("Subsidy price missing"); return }
+            let row = host.convert(price.bounds, from: price), sign: CGFloat = host.isFlipped ? 1 : -1
+            let headerY = row.midY - sign * 51
+            let dividerX = 20 + widths.prefix(5).reduce(0, +)
+            nativeDrag(from: NSPoint(x: dividerX, y: headerY), to: NSPoint(x: dividerX + 40, y: headerY), in: host, window: window)
+            let stored = defaults.data(forKey: "reimbursement.columns.v2.trip.出差补助").flatMap { try? JSONDecoder().decode([String: Double].self, from: $0) }
+            expectTrue(stored != nil)
+            for index in columns.indices { expectTrue(abs((stored?[columns[index].id] ?? 0) - Double(direct[index])) < 3) }
+            nativeDrag(from: NSPoint(x: 43, y: row.midY), to: NSPoint(x: 43, y: row.midY + sign * 65), in: host, window: window)
+            expectEqual(state.claim.expenses.first?.id, firstID)
+            // Numeric header sorting toggles, and order persists through SQLite.
+            let priceX = 20 + direct.prefix(3).reduce(0, +) + direct[3] / 2
+            nativeClick(NSPoint(x: priceX, y: headerY), in: host, window: window)
+            expectEqual(state.claim.expenses.map(\.unitPrice), [5000, 8000])
+            nativeClick(NSPoint(x: priceX, y: headerY), in: host, window: window)
+            expectEqual(state.claim.expenses.map(\.unitPrice), [8000, 5000])
+            if let note = fields(host).first(where: { $0.stringValue == "待编辑备注" }) {
+                nativeClick(host.convert(NSPoint(x: note.bounds.midX, y: note.bounds.midY), from: note), in: host, window: window)
+                if let editor = window.firstResponder as? NSTextView {
+                    editor.selectAll(nil); editor.insertText("补助备注已编辑", replacementRange: NSRange(location: NSNotFound, length: 0))
+                    window.makeFirstResponder(nil); pumpNativeEvents()
+                } else { fail("Note not editable") }
+            } else { fail("Subsidy note missing") }
+            expectEqual(state.claim.expenses.first?.note, "补助备注已编辑")
+            expectEqual(ClaimStore(root: store.root).claims.first { $0.id == claim.id }?.expenses, state.claim.expenses)
+        }
+        try captureView(view, width: 760, height: 300, to: qa.appendingPathComponent("table-subsidy-narrow.png"))
+        for kind in [ExpenseKind.train, .flight, .taxi, .hotel] {
+            var fixture = Claim.make(.trip); fixture.expenses = []; fixture.setTravelerNames(["孙毅强"])
+            fixture.dates = ["2026-10-28", "2026-10-29"]
+            fixture.addExpense(kind, unitPrice: 0)
+            fixture.expenses[0].invoices = [Attachment(name: "孙毅强26337000000777118119电子发票.pdf", storedName: "demo.pdf", amount: 24100, number: "26337000000777118119")]
+            if kind == .taxi { fixture.expenses[0].itineraries = [Attachment(name: "孙毅强26337000000777118119行程单.pdf", storedName: "trip.pdf", amount: 0)] }
+            fixture.expenses[0].origin = "上海虹桥"; fixture.expenses[0].destination = "杭州东"
+            let fixtureState = TripListState(fixture)
+            try captureView(AdjustableTripInteractionView(state: fixtureState, store: store, kind: kind).tint(Palette.accent).defaultAppStorage(defaults),
+                            width: 1350, height: 240, to: qa.appendingPathComponent("table-\(kind.rawValue).png"))
+        }
+        for kind in [ClaimKind.meal, .allowance] {
+            var fixture = Claim.make(kind); fixture.setTravelerNames(["孙毅强"]); fixture.dates = ["2026-10-28", "2026-10-29"]
+            fixture.expenses[0].unitPrice = 3000
+            if kind == .allowance { fixture.allowanceAmount = 80000; fixture.reimbursementPurpose = "办公电脑配件报销" }
+            let invoice = temporary.appendingPathComponent("清单发票.pdf")
+            try makePDF(at: invoice, pages: 1, number: "26337000000777118119", amount: "241.00")
+            fixture = try store.importFiles([invoice, invoice], into: fixture, expenseID: fixture.expenses[0].id)
+            fixture.expenses[0].invoices[1].amount = 10000
+            fixture.invoiceLedgerEntries?[0].detail = "原始发票与金额核对"
+            let total = fixture.total
+            let fixtureState = TripListState(fixture)
+            let ledger = InlineLedgerInteractionView(state: fixtureState, store: store).tint(Palette.accent).defaultAppStorage(defaults)
+            try captureView(ledger, width: 1550, height: 480, to: qa.appendingPathComponent("table-\(kind.rawValue).png")) { window, host in
+                guard let amount = fields(host).first(where: { $0.stringValue == "241.00" }) else { fail("Ledger amount missing"); return }
+                let rect = host.convert(amount.bounds, from: amount), sign: CGFloat = host.isFlipped ? 1 : -1
+                nativeClick(NSPoint(x: rect.midX, y: rect.midY - sign * 51), in: host, window: window)
+                expectEqual(fixtureState.claim.invoiceLedgerRows.map { $0.invoice?.amount }, [10000, 24100])
+                nativeClick(NSPoint(x: rect.midX, y: rect.midY - sign * 51), in: host, window: window)
+                expectEqual(fixtureState.claim.invoiceLedgerRows.map { $0.invoice?.amount }, [24100, 10000])
+                expectEqual(fixtureState.claim.total, total)
+                expectEqual(ClaimStore(root: store.root).claims.first { $0.id == fixture.id }?.invoiceLedgerRows.map(\.id), fixtureState.claim.invoiceLedgerRows.map(\.id))
+            }
+            try captureView(ledger, width: 950, height: 480, to: qa.appendingPathComponent("table-\(kind.rawValue)-narrow.png")) { window, host in
+                guard let scroll = scrolls(host).first(where: { ($0.documentView?.frame.width ?? 0) > $0.contentView.bounds.width + 50 }),
+                      let number = fields(host).first(where: { $0.placeholderString == "发票号码" }) else { fail("Narrow table must scroll horizontally"); return }
+                expectFalse(scroll.hasHorizontalScroller)
+                let before = host.convert(number.bounds, from: number)
+                scroll.contentView.scroll(to: NSPoint(x: 350, y: 0)); scroll.reflectScrolledClipView(scroll.contentView)
+                pumpNativeEvents()
+                guard let fresh = fields(host).first(where: { $0.placeholderString == "发票号码" }) else { fail("Scrolled table missing"); return }
+                let after = host.convert(fresh.bounds, from: fresh)
+                expectTrue(after.midX < before.midX - 200)
+                let scrollRect = host.convert(scroll.bounds, from: scroll)
+                let thumbY = host.isFlipped ? scrollRect.maxY + 4 : scrollRect.minY - 4
+                nativeDrag(from: NSPoint(x: scrollRect.midX, y: thumbY), to: NSPoint(x: scrollRect.minX + 4, y: thumbY), in: host, window: window)
+                expectTrue(scroll.contentView.bounds.minX < 5)
+                let wheel = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2, wheel1: 0, wheel2: -150, wheel3: 0)!
+                let event = NSEvent(cgEvent: wheel)!
+                scroll.scrollWheel(with: event); pumpNativeEvents()
+                expectTrue(scroll.contentView.bounds.minX > 50)
+                nativeClick(NSPoint(x: 950 - 40 - 108 + 24, y: after.midY), in: host, window: window)
+                expectEqual(fixtureState.claim.invoiceCount, 3)
+                nativeClick(NSPoint(x: 950 - 40 - 24, y: after.midY), in: host, window: window)
+                expectEqual(fixtureState.claim.invoiceCount, 2)
+                expectEqual(fixtureState.claim.total, total)
+            }
+        }
+        // The public rename leaves legacy SQLite/JSON enum values intact.
+        expectEqual(ClaimKind(rawValue: "补助"), .allowance)
+        expectEqual(ClaimKind.allowance.displayName, "补贴")
+        expectTrue(Claim.make(.allowance).title.hasPrefix("补贴报销"))
+        expectEqual(ExpenseKind.subsidy.displayName, "出差补助")
+        var sorted = claim
+        sorted.expenses.append(Expense(kind: .train, unitPrice: 100, origin: "Z", claimant: "张三"))
+        sorted.expenses.append(Expense(kind: .train, unitPrice: 200, origin: "A", claimant: "孙毅强"))
+        let preserved = Array(sorted.expenses.prefix(2))
+        sorted.sortExpenses(.train, column: "origin", ascending: true)
+        expectEqual(sorted.expenses.filter { $0.kind == .train }.map(\.origin), ["A", "Z"])
+        expectEqual(Array(sorted.expenses.prefix(2)), preserved)
+    }
+
+    @MainActor func testTableCopyReplacementAndItineraryCapacity() throws {
+        let store = ClaimStore(root: temporary.appendingPathComponent("db"))
+        let invoice = temporary.appendingPathComponent("打车发票.pdf"), itinerary = temporary.appendingPathComponent("行程单.pdf")
+        try makeTripImportPDF(invoice, lines: ["电子发票（普通发票）", "发票号码：12345678901234567890", "价税合计 ¥38.00"])
+        try makeTripImportPDF(itinerary, lines: ["打车行程单", "发票号码：12345678901234567890"])
+        var claim = Claim.make(.trip); claim.expenses = []; claim.setTravelerNames(["张三"])
+        claim = try store.importTripFiles([invoice, itinerary], into: claim, kind: .taxi)
+        let original = claim.expenses[0]
+        claim = try store.duplicateExpense(original.id, in: claim)
+        expectEqual(claim.invoiceCount, 2); expectEqual(claim.total, 7600)
+        let copy = claim.expenses[1]
+        expectTrue(original.id != copy.id)
+        for (a, b) in zip(original.attachments, copy.attachments) {
+            expectTrue(a.id != b.id); expectTrue(a.storedName != b.storedName)
+            expectEqual(try Data(contentsOf: store.url(for: a)), try Data(contentsOf: store.url(for: b)))
+        }
+        let before = try FileManager.default.contentsOfDirectory(atPath: store.root.appendingPathComponent("Attachments").path).sorted()
+        expectThrowsError(try store.importFiles([itinerary], into: claim, expenseID: original.id, role: .itinerary))
+        expectEqual(try FileManager.default.contentsOfDirectory(atPath: store.root.appendingPathComponent("Attachments").path).sorted(), before)
+        expectTrue(store.moveItinerary(copy.itineraries![0], in: claim, from: copy.id, to: original.id) == nil)
+        claim = try store.importTripFiles([itinerary], into: claim, kind: .taxi)
+        expectEqual(claim.expenses.count, 3)
+        expectEqual(claim.expenses[2].invoices.count, 0)
+        expectEqual(claim.expenses[2].itineraries?.count, 1)
+        expectEqual(claim.invoiceCount, 2)
+        claim.moveExpense(copy.id, within: .taxi, to: 0)
+        expectEqual(claim.expenses[0].id, copy.id)
+        expectTrue(store.save(claim))
+        expectEqual(ClaimStore(root: store.root).claims.first { $0.id == claim.id }?.expenses, claim.expenses)
+        // A copy has independent files; removing it cannot break the original invoice.
+        claim = store.removeAttachment(copy.invoices[0], from: claim, expenseID: copy.id)!
+        expectTrue(FileManager.default.fileExists(atPath: store.url(for: original.invoices[0]).path))
+        for kind in [ClaimKind.meal, .allowance] {
+            var ledger = Claim.make(kind); ledger.setTravelerNames(["张三"]); ledger.dates = ["2026-10-28", "2026-10-29"]
+            ledger.expenses[0].unitPrice = 3000
+            if kind == .allowance { ledger.allowanceAmount = 80000 }
+            ledger = try store.importFiles([invoice], into: ledger, expenseID: ledger.expenses[0].id)
+            let total = ledger.total, originalRow = ledger.invoiceLedgerRows[0]
+            ledger = try store.duplicateLedgerRow(originalRow.id, in: ledger)
+            expectEqual(ledger.invoiceCount, 2); expectEqual(ledger.total, total)
+            let replacement = temporary.appendingPathComponent("替换发票.pdf")
+            try makePDF(at: replacement, pages: 1, number: "26337000000777118119", amount: "241.00")
+            let copiedRowID = ledger.invoiceLedgerRows[1].id
+            ledger = try store.replaceLedgerRowInvoice(copiedRowID, with: replacement, in: ledger, expenseID: ledger.expenses[0].id)
+            expectEqual(ledger.invoiceLedgerRows[1].invoice?.number, "26337000000777118119")
+            expectEqual(ledger.invoiceLedgerRows[1].entry.reimbursementAmount, 3800)
+            expectEqual(ledger.total, total)
+            ledger.moveLedgerRow(copiedRowID, to: 0)
+            expectEqual(ledger.invoiceLedgerRows[0].id, copiedRowID)
+            ledger = store.removeLedgerRow(copiedRowID, in: ledger)!
+            expectEqual(ledger.invoiceLedgerRows.count, 1)
+            expectEqual(ledger.invoiceLedgerRows[0].id, originalRow.id)
+            expectEqual(ledger.total, total)
+            expectTrue(PDFDocument(url: store.url(for: originalRow.invoice!)) != nil)
+        }
+        // A failed copy cleans up only newly created files.
+        var broken = claim
+        let brokenIndex = broken.expenses.firstIndex { $0.id == original.id }!
+        broken.expenses[brokenIndex].invoices.append(Attachment(name: "不存在.pdf", storedName: "missing.pdf"))
+        let filesBefore = try FileManager.default.contentsOfDirectory(atPath: store.root.appendingPathComponent("Attachments").path).sorted()
+        expectThrowsError(try store.duplicateExpense(original.id, in: broken))
+        expectEqual(try FileManager.default.contentsOfDirectory(atPath: store.root.appendingPathComponent("Attachments").path).sorted(), filesBefore)
+    }
+
+    private func makeTripImportPDF(_ url: URL, lines: [String]) throws {
+        var bounds = CGRect(x: 0, y: 0, width: 595, height: 842)
+        let context = CGContext(url as CFURL, mediaBox: &bounds, nil)!
+        context.beginPDFPage(nil)
+        context.setFillColor(CGColor.white); context.fill(bounds)
+        NSGraphicsContext.saveGraphicsState(); NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: false)
+        for (index, line) in lines.enumerated() {
+            line.draw(at: NSPoint(x: 35, y: 760 - index * 65), withAttributes: [.font: NSFont.systemFont(ofSize: 22), .foregroundColor: NSColor.black])
+        }
+        NSGraphicsContext.restoreGraphicsState(); context.endPDFPage(); context.closePDF()
+    }
 
     @MainActor func testCompactMealInfoAndMenuNavigation() throws {
         let qa = ProcessInfo.processInfo.environment["REIMBUR_QA_DIR"].map { URL(fileURLWithPath: $0) } ?? temporary!
@@ -208,7 +1398,7 @@ final class ReimburChecks {
             }
             let amounts = fields(host).filter { $0.stringValue == "241.00" }
                 .sorted { host.convert($0.bounds.origin, from: $0).y < host.convert($1.bounds.origin, from: $1).y }
-            guard amounts.count == 3, let attachmentAmount = amounts.last else { fail("Expected ledger amounts and independent attachment amount field"); return }
+            guard amounts.count == 2, let attachmentAmount = amounts.first else { fail("Expected invoice amount and reimbursement amount in ledger row"); return }
             nativeClick(host.convert(NSPoint(x: attachmentAmount.bounds.midX, y: attachmentAmount.bounds.midY), from: attachmentAmount), in: host, window: window)
             guard let editor = window.firstResponder as? NSTextView else { fail("Attachment amount not editable"); return }
             editor.selectAll(nil); editor.insertText("250.00", replacementRange: NSRange(location: NSNotFound, length: 0))
@@ -217,7 +1407,7 @@ final class ReimburChecks {
             expectEqual(saved.invoiceLedgerRows.first?.invoice?.amount, 25000)
             expectEqual(saved.total, 6000)
             expectEqual(saved.ledgerReimbursementTotal, 24100)
-            expectEqual(fields(host).filter { $0.stringValue == "250.00" }.count, 2)
+            expectEqual(fields(host).filter { $0.stringValue == "250.00" }.count, 1)
         }
         var allowance = store.claims.first { $0.id == claim.id }!
         allowance.id = UUID(); allowance.kind = .allowance; allowance.title = "补助报销20260824"
@@ -371,8 +1561,9 @@ final class ReimburChecks {
         expectEqual(try cell("F7").stringValue, "135.25")
         expectEqual(try cell("G7").stringValue, "油票 & 其他")
         expectEqual(try cell("B2").stringValue, String(LedgerExporter.excelDate("2026-10-23")!))
-        expectTrue((try cell("E8").stringValue ?? "").contains(Money.input(claim.invoiceTotal)))
-        expectTrue((try cell("F8").stringValue ?? "").contains(Money.input(claim.ledgerReimbursementTotal)))
+        expectEqual(try document.nodes(forXPath: "//*[local-name()='c' and @r='E8']").count, 0)
+        expectEqual(try document.nodes(forXPath: "//*[local-name()='c' and @r='F8']").count, 0)
+        expectEqual(try document.nodes(forXPath: "//*[local-name()='autoFilter']").count, 0)
         expectNil(LedgerExporter.excelDate("2026-02-30"))
         let printFile = temporary.appendingPathComponent("打印.docx")
         try WordExporter.export(claims: [claim], attachmentRoot: store.root.appendingPathComponent("Attachments"), to: printFile)
@@ -390,6 +1581,55 @@ final class ReimburChecks {
         try LedgerExporter.export(claim: meal, to: qa.appendingPathComponent("餐补清单.xlsx"))
         try captureView(ClaimEditor(claim: meal).environmentObject(store).background(Palette.canvas).textFieldStyle(.roundedBorder).tint(Palette.accent),
                         width: 950, height: 1000, to: qa.appendingPathComponent("meal-ledger.png"))
+    }
+
+    @MainActor func testTripInvoiceLedgerAndXLSXExport() throws {
+        let qa = ProcessInfo.processInfo.environment["REIMBUR_QA_DIR"].map { URL(fileURLWithPath: $0) } ?? temporary!
+        try FileManager.default.createDirectory(at: qa, withIntermediateDirectories: true)
+        let store = ClaimStore(root: temporary.appendingPathComponent("trip-ledger-db"))
+        var claim = Claim.make(.trip)
+        claim.setTravelerNames(["孙毅强"])
+        claim.dates = ["2026-10-23", "2026-10-24"]
+        claim.tripPurpose = "宁波项目现场调试"
+        claim.expenses = [Expense(kind: .train, unitPrice: 6900, origin: "杭州", destination: "宁波", claimant: "孙毅强")]
+        let source = temporary.appendingPathComponent("出差火车票.pdf")
+        try makeTripImportPDF(source, lines: ["电子发票（铁路电子客票）", "发票号码：26337000000388325068", "出发站：杭州东站", "到达站：宁波站", "乘车日期：2026-10-23", "票价 ¥69.00"])
+        claim = try store.importFiles([source], into: claim, expenseID: claim.expenses[0].id)
+        expectEqual(claim.invoiceLedgerRows.count, 1)
+        expectEqual(claim.invoiceLedgerRows[0].entry.claimant, "孙毅强")
+        expectEqual(claim.ledgerPurpose, "宁波项目现场调试")
+        expectEqual(claim.invoiceLedgerRows[0].purpose, "宁波项目现场调试")
+        expectEqual(claim.invoiceLedgerRows[0].invoice?.amount, 6900)
+        expectEqual(claim.invoiceLedgerRows[0].entry.detail, "火车")
+        let taxiInvoice = Attachment(name: "打车发票.pdf", storedName: "taxi.pdf", amount: 3200, number: "26337000000388325069")
+        let hotelInvoice = Attachment(name: "住宿发票.pdf", storedName: "hotel.pdf", amount: 20000, number: "26337000000388325070")
+        let taxi = Expense(kind: .taxi, unitPrice: 3200, invoices: [taxiInvoice], claimant: "孙毅强")
+        var hotel = Expense(kind: .hotel, unitPrice: 20000, invoices: [hotelInvoice], claimant: "孙毅强")
+        hotel.setTotalAmount(20000)
+        claim.expenses.append(contentsOf: [hotel, taxi])
+        claim.invoiceLedgerEntries?.append(InvoiceLedgerEntry(expenseID: hotel.id, invoiceID: hotelInvoice.id, date: "2026-10-24",
+                                                             claimant: "孙毅强", reimbursementAmount: 20000, detail: "住宿"))
+        claim.invoiceLedgerEntries?.append(InvoiceLedgerEntry(expenseID: taxi.id, invoiceID: taxiInvoice.id, date: "2026-10-23",
+                                                             claimant: "孙毅强", reimbursementAmount: 3200, detail: "打车"))
+        expectEqual(claim.invoiceLedgerRows.map { $0.entry.detail }, ["火车", "住宿", "打车"])
+        expectEqual(claim.invoiceLedgerRowsInTypeOrder.map { $0.entry.detail }, ["火车", "打车", "住宿"])
+        let output = qa.appendingPathComponent("出差报销清单.xlsx")
+        try LedgerExporter.export(claim: claim, to: output)
+        let extracted = temporary.appendingPathComponent("trip-ledger-xlsx")
+        try run("/usr/bin/ditto", ["-x", "-k", output.path, extracted.path])
+        let document = try XMLDocument(contentsOf: extracted.appendingPathComponent("xl/worksheets/sheet1.xml"), options: [])
+        func cell(_ address: String) throws -> XMLElement { try document.nodes(forXPath: "//*[local-name()='c' and @r='\(address)']").first as! XMLElement }
+        expectEqual(try cell("C1").stringValue, "姓名")
+        expectEqual(try cell("D2").stringValue, "26337000000388325068")
+        expectEqual(try cell("E2").stringValue, "69.00")
+        expectEqual(try cell("G2").stringValue, "火车")
+        expectEqual(try cell("G3").stringValue, "打车")
+        expectEqual(try cell("G4").stringValue, "住宿")
+        expectEqual(try cell("H2").stringValue, "宁波项目现场调试")
+        expectEqual(try document.nodes(forXPath: "//*[local-name()='c' and @r='E5']").count, 0)
+        expectEqual(try document.nodes(forXPath: "//*[local-name()='autoFilter']").count, 0)
+        try captureView(ClaimEditor(claim: claim).environmentObject(store).background(Palette.canvas).tint(Palette.accent),
+                        width: 1450, height: 1500, to: qa.appendingPathComponent("trip-ledger.png"))
     }
 
     @MainActor func testInvoiceLedgerNativeEditingAndStatusChart() throws {
@@ -826,7 +2066,7 @@ final class ReimburChecks {
         let duplicate = Claim.make(.trip, date: date)
         expectEqual(first.title, "出差报销20261023")
         expectEqual(second.title, "餐补报销20261023")
-        expectEqual(Claim.make(.allowance, date: date).title, "补助报销20261023")
+        expectEqual(Claim.make(.allowance, date: date).title, "补贴报销20261023")
         expectEqual(duplicate.title, first.title)
         expectFalse(first.id == second.id)
         let database = try Database(root: temporary)
@@ -1505,8 +2745,8 @@ final class ReimburChecks {
         expectEqual(claim.difference, 0)
         expectEqual(claim.expenseGroups[0].total(in: claim), 110600)
         expectEqual(claim.personBreakdowns[0].total(in: claim), 110600)
-        expectEqual(claim.expenses[0].origin, "上海虹桥")
-        expectEqual(claim.expenses[0].destination, "杭州东")
+        expectEqual(claim.expenses[0].origin, "上海")
+        expectEqual(claim.expenses[0].destination, "杭州")
         let removed = claim.expenses[0].invoices[1]
         claim = store.removeAttachment(removed, from: claim, expenseID: id)!
         expectEqual(claim.total, 55300)
@@ -2251,7 +3491,24 @@ private var failures = 0
         RunLoop.current.run(until: Date().addingTimeInterval(0.005))
     }
 }
+@MainActor private func verificationViews<T: NSView>(_ view: NSView, _ type: T.Type) -> [T] {
+    (view as? T).map { [$0] } ?? view.subviews.flatMap { verificationViews($0, type) }
+}
+@MainActor private func verificationMovePointer(_ point: NSPoint, in host: NSView, window: NSWindow) {
+    window.acceptsMouseMovedEvents = true
+    let screen = window.convertPoint(toScreen: host.convert(point, to: nil))
+    let global = CGPoint(x: screen.x, y: NSScreen.screens[0].frame.maxY - screen.y)
+    CGWarpMouseCursorPosition(global)
+    CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: global, mouseButton: .left)?.post(tap: .cghidEventTap)
+    let moved = NSEvent.mouseEvent(with: .mouseMoved, location: host.convert(point, to: nil), modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 0, pressure: 0)!
+    NSApplication.shared.postEvent(moved, atStart: false)
+    pumpNativeEvents(0.25)
+}
 private var nativeEventNumber = 1000
+private func nativeFilePreviewPoint(_ name: String, columnStart: CGFloat, columnWidth: CGFloat, y: CGFloat) -> NSPoint {
+    let textWidth = min((name as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 12)]).width, columnWidth - 49)
+    return NSPoint(x: columnStart + columnWidth / 2 - (29 + textWidth) / 2 + 11, y: y)
+}
 @MainActor private func nativeClick(_ point: NSPoint, in view: NSView, window: NSWindow, count: Int = 1) {
     nativeEventNumber += 1
     let location = view.convert(point, to: nil)
@@ -2260,6 +3517,25 @@ private var nativeEventNumber = 1000
     let down = NSEvent.mouseEvent(with: .leftMouseDown, location: location, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil, eventNumber: nativeEventNumber, clickCount: count, pressure: 1)!
     NSApplication.shared.sendEvent(down)
     pumpNativeEvents()
+}
+@MainActor private func nativeDrag(from start: NSPoint, to end: NSPoint, in view: NSView, window: NSWindow) {
+    nativeEventNumber += 1
+    let number = nativeEventNumber, windowNumber = window.windowNumber
+    let points = (1...20).map { step in view.convert(NSPoint(x: start.x + (end.x - start.x) * CGFloat(step) / 20, y: start.y + (end.y - start.y) * CGFloat(step) / 20), to: nil) }
+    DispatchQueue.global().async {
+        Thread.sleep(forTimeInterval: 0.05)
+        for (index, point) in points.enumerated() {
+            let type: NSEvent.EventType = index == points.count - 1 ? .leftMouseUp : .leftMouseDragged
+            let event = NSEvent.mouseEvent(with: type, location: point, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                          windowNumber: windowNumber, context: nil, eventNumber: number, clickCount: 1, pressure: type == .leftMouseUp ? 0 : 1)!
+            NSApplication.shared.postEvent(event, atStart: false)
+            Thread.sleep(forTimeInterval: 0.015)
+        }
+    }
+    let down = NSEvent.mouseEvent(with: .leftMouseDown, location: view.convert(start, to: nil), modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                 windowNumber: windowNumber, context: nil, eventNumber: number, clickCount: 1, pressure: 1)!
+    NSApplication.shared.sendEvent(down)
+    pumpNativeEvents(0.9)
 }
 private func fail(_ text: String, file: StaticString = #filePath, line: UInt = #line) {
     failures += 1
@@ -2294,6 +3570,23 @@ private func expectNoThrow<T>(_ action: @autoclosure () throws -> T, file: Stati
         NSApplication.shared.activate(ignoringOtherApps: true)
         let checks = ReimburChecks()
         let tests: [(String, () throws -> Void)] = [
+            ("Manual route text is preserved", checks.testManualRouteTextIsPreserved),
+            ("Zoomed previews stay inside viewport", checks.testZoomedPreviewsStayInsideViewport),
+            ("Rail cities in lists forms and imports", checks.testRailCitiesInListsFormsAndImports),
+            ("Global previews and close buttons", checks.testGlobalPreviewsAndCloseButtons),
+            ("Selectable trip form zoom pan and copy", checks.testSelectableTripFormZoomPanAndCopy),
+            ("Native invoice hover follows and dismisses", checks.testNativeInvoiceHoverPreviewFollowsAndDismisses),
+            ("Rail arrival date defaults and overrides", checks.testRailArrivalDateDefaultsAndOverrides),
+            ("Rail times defaults and SQLite compatibility", checks.testRailTimesDefaultsAndPersistence),
+            ("Trip form reconciliation and rendering", checks.testTripFormReconciliationAndRendering),
+            ("Trip form native editor and time selection", checks.testTripFormNativeEditorAndTimeSelection),
+            ("Hover sorting centered cells and external scrollbar", checks.testHoverSortingCenteredCellsAndOverlayScrollbar),
+            ("Centered tables adjacent resizing column sorting", checks.testCenteredTablesAdjacentResizeAndSorting),
+            ("Table row copies replacement and itinerary capacity", checks.testTableCopyReplacementAndItineraryCapacity),
+            ("Trip mixed batch import and rollback", checks.testTripMixedBatchImportAndRollback),
+            ("Trip list native editing and screenshots", checks.testTripListNativeEditingAndScreenshots),
+            ("Taxi itinerary column and preview", checks.testTaxiAttachmentDisclosure),
+            ("Inline ledger files and subsidy columns", checks.testInlineLedgerFilesAndSubsidyColumns),
             ("Undated allowance migration and independent amount", checks.testUndatedAllowanceMigrationAndIndependentAmount),
             ("Undated allowance editor and meal info layout", checks.testUndatedAllowanceEditorAndMealInfoLayout),
             ("Compact meal info and menu navigation", checks.testCompactMealInfoAndMenuNavigation),
@@ -2301,6 +3594,7 @@ private func expectNoThrow<T>(_ action: @autoclosure () throws -> T, file: Stati
             ("Invoice ledger legacy migration preserves amounts and attachments", checks.testInvoiceLedgerPreservesLegacyAmountsAndAttachments),
             ("Invoice ledger batch recognition editing and deletion", checks.testInvoiceLedgerBatchRecognitionEditingAndDeletion),
             ("Invoice ledger XLSX and print exports", checks.testInvoiceLedgerXLSXAndPrintExports),
+            ("Trip invoice ledger and XLSX export", checks.testTripInvoiceLedgerAndXLSXExport),
             ("Invoice ledger native editing and status chart", checks.testInvoiceLedgerNativeEditingAndStatusChart),
             ("Claim status legacy decoding and SQLite persistence", checks.testClaimStatusLegacyAndSQLitePersistence),
             ("Claim status filtering statistics and record metadata", checks.testClaimStatusFilteringStatisticsAndMetadata),

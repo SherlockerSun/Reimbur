@@ -20,6 +20,57 @@ enum AppPreferences {
 
 enum ExpenseAttachmentRole { case invoice, itinerary }
 
+struct TripImportFile {
+    var source: URL
+    var role: ExpenseAttachmentRole
+    var invoiceNumber: String?
+    var orderNumber: String?
+}
+
+enum TripImportRecognition {
+    static func role(text: String, filename: String) -> ExpenseAttachmentRole {
+        let compact = text.replacingOccurrences(of: #"\s"#, with: "", options: .regularExpression)
+        // Use the first document title: either kind can mention the other in its notes/footer.
+        let invoiceTitle = compact.range(of: #"电子(?:普通|专用)?发票|增值税(?:电子)?(?:普通|专用)?发票"#, options: .regularExpression)
+        let itineraryTitle = compact.range(of: #"行程单|行程明细|行程证明|用车明细"#, options: .regularExpression)
+        if let invoiceTitle, let itineraryTitle { return invoiceTitle.lowerBound < itineraryTitle.lowerBound ? .invoice : .itinerary }
+        if invoiceTitle != nil { return .invoice }
+        if itineraryTitle != nil { return .itinerary }
+        if ["行程单", "行程明细", "行程证明", "用车明细"].contains(where: { filename.contains($0) }) { return .itinerary }
+        return .invoice
+    }
+    static func inspect(_ source: URL, kind: ExpenseKind) throws -> TripImportFile {
+        let scoped = source.startAccessingSecurityScopedResource()
+        defer { if scoped { source.stopAccessingSecurityScopedResource() } }
+        var text = ""
+        var role: ExpenseAttachmentRole = .invoice
+        if source.pathExtension.lowercased() == "pdf" {
+            guard let pdf = PDFDocument(url: source), !pdf.isLocked, pdf.pageCount > 0 else {
+                throw ReimburError("\(source.lastPathComponent) 不是有效的 PDF，或文件已加密。")
+            }
+            if kind == .taxi {
+                text = (0..<min(pdf.pageCount, 2)).compactMap { pdf.page(at: $0)?.string }.joined(separator: "\n")
+                if text.trimmingCharacters(in: .whitespacesAndNewlines).count < 12 {
+                    for index in 0..<min(pdf.pageCount, 2) {
+                        guard let page = pdf.page(at: index) else { continue }
+                        text += "\n" + AttachmentRecognition.recognizedText(image: page.thumbnail(of: NSSize(width: 1800, height: 2400), for: .mediaBox))
+                    }
+                }
+                role = Self.role(text: text, filename: source.lastPathComponent)
+            }
+        } else {
+            guard kind == .taxi, let image = NSImage(contentsOf: source), image.isValid else {
+                throw ReimburError("发票请选择 PDF；打车行程单也支持常见图片。")
+            }
+            role = .itinerary
+            text = AttachmentRecognition.recognizedText(image: image)
+        }
+        return TripImportFile(source: source, role: role,
+                              invoiceNumber: AttachmentNaming.number(in: text, filename: source.lastPathComponent, role: .invoice),
+                              orderNumber: AttachmentNaming.number(in: text, role: .itinerary))
+    }
+}
+
 struct AttachmentNaming {
     static let defaultFormat = "{报销人}{发票号码}"
     var invoiceFormat = Self.defaultFormat
@@ -35,7 +86,7 @@ struct AttachmentNaming {
         let linkedNumbers = Set(expense.invoices.compactMap { $0.number ?? Self.number(in: "", filename: $0.name, role: .invoice) })
         let invoiceNumber = number ?? (role == .itinerary && linkedNumbers.count == 1 ? linkedNumbers.first : nil)
         let fields = ["报销人": expense.claimant ?? claim.travelerNames?.first ?? "未分配", "发票号码": invoiceNumber ?? original,
-                      "行程单号": number ?? original, "报销名称": claim.title, "费用类型": expense.kind.rawValue,
+                      "行程单号": number ?? original, "报销名称": claim.title, "费用类型": expense.kind.displayName,
                       "原文件名": original, "日期": claim.dates.sorted().first ?? DayKey.string(claim.createdAt)]
         for (key, replacement) in fields { value = value.replacingOccurrences(of: "{\(key)}", with: replacement) }
         return Self.safeStem(value, fallback: original) + "." + source.pathExtension.lowercased()
@@ -80,6 +131,7 @@ struct AttachmentMetadata {
     var number: String?
     var amount: Int64?
     var route: RailRoute?
+    var railTimes: RailTimes?
 }
 
 struct RailRoute: Hashable {
@@ -140,7 +192,7 @@ enum AttachmentRecognition {
     static func read(pdf: PDFDocument, source: URL, role: ExpenseAttachmentRole, kind: ExpenseKind? = nil) -> AttachmentMetadata {
         let text = (0..<min(pdf.pageCount, 2)).compactMap { pdf.page(at: $0)?.string }.joined(separator: "\n")
         var result = metadata(text: text, source: source, role: role, kind: kind)
-        guard result.number == nil || (role == .invoice && result.amount == nil) || (kind == .train && result.route == nil) else { return result }
+        guard result.number == nil || (role == .invoice && result.amount == nil) || (kind == .train && (result.route == nil || result.railTimes?.departure == nil)) else { return result }
         // Scans and PDFs with incomplete text layers are recognized locally, once for both fields.
         for index in 0..<min(pdf.pageCount, 2) {
             guard let page = pdf.page(at: index) else { continue }
@@ -152,24 +204,30 @@ enum AttachmentRecognition {
             result.number = result.number ?? recognized.number
             result.amount = result.amount ?? recognized.amount
             result.route = result.route ?? recognized.route
-            if result.number != nil && (role == .itinerary || result.amount != nil) && (kind != .train || result.route != nil) { break }
+            if let times = recognized.railTimes {
+                result.railTimes = RailTimes(departure: result.railTimes?.departure ?? times.departure, arrival: result.railTimes?.arrival ?? times.arrival)
+            }
+            if result.number != nil && (role == .itinerary || result.amount != nil) && (kind != .train || (result.route != nil && result.railTimes?.departure != nil)) { break }
         }
         return result
     }
     static func read(image: NSImage, source: URL, role: ExpenseAttachmentRole, kind: ExpenseKind? = nil) -> AttachmentMetadata {
+        metadata(text: recognizedText(image: image), source: source, role: role, kind: kind)
+    }
+    static func recognizedText(image: NSImage) -> String {
         var rect = CGRect(origin: .zero, size: image.size)
-        guard let cgImage = image.cgImage(forProposedRect: &rect, context: nil, hints: nil) else { return metadata(text: "", source: source, role: role, kind: kind) }
+        guard let cgImage = image.cgImage(forProposedRect: &rect, context: nil, hints: nil) else { return "" }
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
         request.recognitionLanguages = ["zh-Hans", "en-US"]
         request.usesLanguageCorrection = false
         try? VNImageRequestHandler(cgImage: cgImage).perform([request])
-        let recognized = (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }.joined(separator: "\n")
-        return metadata(text: recognized, source: source, role: role, kind: kind)
+        return (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }.joined(separator: "\n")
     }
     private static func metadata(text: String, source: URL, role: ExpenseAttachmentRole, kind: ExpenseKind? = nil) -> AttachmentMetadata {
         AttachmentMetadata(number: AttachmentNaming.number(in: text, filename: source.deletingPathExtension().lastPathComponent, role: role),
-                           amount: role == .invoice ? amount(in: text) : nil, route: kind == .train && role == .invoice ? trainRoute(in: text) : nil)
+                           amount: role == .invoice ? amount(in: text) : nil, route: kind == .train && role == .invoice ? trainRoute(in: text) : nil,
+                           railTimes: kind == .train && role == .invoice ? RailTimes.recognize(text) : nil)
     }
 }
 

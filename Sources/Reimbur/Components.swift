@@ -337,53 +337,104 @@ struct PeopleTagInput: View {
     @State private var renameError = false
     @FocusState private var editingFocused: Bool
     private let inputID = "traveler-name-input"
+    @State private var scrollContentWidth: CGFloat = 0
+    @State private var scrollOffset: CGFloat = 0
+    @State private var scrollCommand: PeopleTagScrollCommand?
+    @State private var scrollHovering = false
+    @State private var scrolling = false
+    @State private var scrollToken = UUID()
+    @State private var barDragStartOffset: CGFloat?
     var body: some View {
         GeometryReader { geometry in
             ScrollViewReader { reader in
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 6) {
-                        ForEach(names, id: \.self) { name in
-                            HStack(spacing: 6) {
-                                if editingName == name {
-                                    TextField("修改姓名", text: $editedName).textFieldStyle(.plain)
-                                        .frame(width: max(60, CGFloat(editedName.count) * 14 + 8))
-                                        .focused($editingFocused).onSubmit(commitRename)
-                                        .onChange(of: editingFocused) { _, value in if !value { commitRename() } }
-                                        .onExitCommand { editingName = nil; editingFocused = false }
-                                        .accessibilityLabel("修改报销人姓名")
-                                } else {
-                                    Text(name).lineLimit(1)
-                                }
-                                Button { names.removeAll { $0 == name } } label: {
-                                    Image(systemName: "xmark").font(.system(size: 9, weight: .bold))
-                                }.buttonStyle(.plain).help("移除\(name)")
-                            }.font(.system(size: 12)).padding(.horizontal, 9).padding(.vertical, 5)
-                                .foregroundStyle(Palette.accent).background(Palette.accent.opacity(0.09), in: Capsule())
-                                .contentShape(Capsule()).simultaneousGesture(TapGesture(count: 2).onEnded {
-                                    guard editingName == nil else { return }
-                                    commit(); focused = false
-                                    editingName = name; editedName = name
-                                    DispatchQueue.main.async { editingFocused = true }
-                                }).help("双击修改姓名")
-                        }
-                        TextField("输入姓名，回车确认", text: $input).textFieldStyle(.plain)
-                            .font(.system(size: 12)).focused($focused).frame(minWidth: 130)
-                            .onSubmit {
-                                commit()
-                                DispatchQueue.main.async { reader.scrollTo(inputID, anchor: .trailing) }
-                            }.onChange(of: focused) { _, value in if !value { commit() } }
-                            .accessibilityLabel("出差人姓名").id(inputID)
-                    }.frame(minWidth: max(0, geometry.size.width - 16), alignment: .leading).padding(.horizontal, 8)
-                        .frame(height: 38)
-                        .background(Color.clear.contentShape(Rectangle()).onTapGesture { if editingName == nil { focused = true } })
+                VStack(spacing: 2) {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 6) {
+                            ForEach(names, id: \.self) { name in
+                                HStack(spacing: 6) {
+                                    if editingName == name {
+                                        TextField("修改姓名", text: $editedName).textFieldStyle(.plain)
+                                            .frame(width: max(60, CGFloat(editedName.count) * 14 + 8))
+                                            .focused($editingFocused).onSubmit(commitRename)
+                                            .onChange(of: editingFocused) { _, value in if !value { commitRename() } }
+                                            .onExitCommand { editingName = nil; editingFocused = false }
+                                            .accessibilityLabel("修改报销人姓名")
+                                    } else {
+                                        Text(name).lineLimit(1)
+                                    }
+                                    Button { names.removeAll { $0 == name } } label: {
+                                        Image(systemName: "xmark").font(.system(size: 9, weight: .bold))
+                                    }.buttonStyle(.plain).help("移除\(name)")
+                                }.font(.system(size: 12)).padding(.horizontal, 9).padding(.vertical, 5)
+                                    .foregroundStyle(Palette.accent).background(Palette.accent.opacity(0.09), in: Capsule())
+                                    .contentShape(Capsule()).simultaneousGesture(TapGesture(count: 2).onEnded {
+                                        guard editingName == nil else { return }
+                                        commit(); focused = false
+                                        editingName = name; editedName = name
+                                        DispatchQueue.main.async { editingFocused = true }
+                                    }).help("双击修改姓名")
+                            }
+                            TextField("输入姓名，回车确认", text: $input).textFieldStyle(.plain)
+                                .font(.system(size: 12)).focused($focused).frame(minWidth: 130)
+                                .onSubmit {
+                                    commit()
+                                    DispatchQueue.main.async { reader.scrollTo(inputID, anchor: .trailing) }
+                                }.onChange(of: focused) { _, value in if !value { commit() } }
+                                .accessibilityLabel("报销人姓名").id(inputID)
+                        }.frame(minWidth: max(0, geometry.size.width - 16), alignment: .leading).padding(.horizontal, 8)
+                            .frame(height: 38)
+                            .background(GeometryReader { contentGeometry in
+                                Color.clear
+                                    .preference(key: PeopleTagContentWidthKey.self, value: contentGeometry.size.width)
+                            })
+                            .background(PeopleTagScrollBridge(command: scrollCommand) { value in
+                                guard abs(scrollOffset - value) > 0.5 else { return }
+                                scrollOffset = value
+                                showScrollbarWhileScrolling()
+                            }.frame(width: 0, height: 0))
+                            .background(Color.clear.contentShape(Rectangle()).onTapGesture { if editingName == nil { focused = true } })
+                    }
+                    .frame(height: 38)
+                    .background(.white, in: RoundedRectangle(cornerRadius: 7))
+                    .overlay(RoundedRectangle(cornerRadius: 7).stroke(focused ? Palette.accent : Palette.ink.opacity(0.18), lineWidth: focused ? 1.5 : 1))
+                    .onPreferenceChange(PeopleTagContentWidthKey.self) { scrollContentWidth = $0 }
+                    if scrollContentWidth > geometry.size.width + 0.5 {
+                        let track = max(0, geometry.size.width - 4)
+                        let thumb = max(36, track * geometry.size.width / scrollContentWidth)
+                        let travel = max(1, track - thumb)
+                        let maximum = scrollContentWidth - geometry.size.width
+                        ZStack(alignment: .leading) {
+                            Capsule().fill(Palette.ink.opacity(0.04)).frame(height: 4)
+                            Capsule().fill(Palette.muted.opacity(0.5)).frame(width: thumb, height: 4)
+                                .offset(x: min(max(0, scrollOffset), maximum) / maximum * travel)
+                        }.frame(height: 8).padding(.horizontal, 2)
+                            .opacity(scrollHovering || scrolling ? 1 : 0)
+                            .contentShape(Rectangle())
+                            .gesture(DragGesture(minimumDistance: 0).onChanged { value in
+                                if barDragStartOffset == nil { barDragStartOffset = scrollOffset }
+                                let start = barDragStartOffset ?? 0
+                                scrollCommand = PeopleTagScrollCommand(offset: min(max(0, start + value.translation.width / travel * maximum), maximum))
+                                showScrollbarWhileScrolling()
+                            }.onEnded { _ in
+                                barDragStartOffset = nil
+                                showScrollbarWhileScrolling()
+                            })
+                    }
                 }
+                .background(PeopleTagHoverReader { scrollHovering = $0 })
+                .contentShape(Rectangle())
                 .onChange(of: focused) { _, value in if value { reader.scrollTo(inputID, anchor: .trailing) } }
             }
-        }.frame(height: 38)
-            .background(.white, in: RoundedRectangle(cornerRadius: 7))
-            .overlay(RoundedRectangle(cornerRadius: 7).stroke(focused ? Palette.accent : Palette.ink.opacity(0.18), lineWidth: focused ? 1.5 : 1))
+        }.frame(height: 50)
             .background(OutsideClickObserver(enabled: (focused && !input.isEmpty) || editingName != nil, action: { commit(); commitRename() }))
             .alert("姓名不能为空或与其他报销人重复", isPresented: $renameError) { Button("知道了", role: .cancel) {} }
+    }
+    private func showScrollbarWhileScrolling() {
+        scrolling = true
+        let token = UUID(); scrollToken = token
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                            if scrollToken == token { scrolling = false }
+        }
     }
     private func commit() {
         let name = input.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -399,6 +450,122 @@ struct PeopleTagInput: View {
         if let rename {
             if !rename(original, name) { renameError = true }
         } else if let index = names.firstIndex(of: original) { names[index] = name }
+    }
+}
+
+private struct PeopleTagContentWidthKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
+}
+
+private struct PeopleTagScrollCommand {
+    let id = UUID()
+    var offset: CGFloat
+}
+
+// Keep hover tracking off the SwiftUI content view. Text fields and tag buttons
+// install their own tracking areas; changing their ancestor's hover state can
+// swallow the click that switches pages or closes an overlay.
+private struct PeopleTagHoverReader: NSViewRepresentable {
+    var onChange: (Bool) -> Void
+    func makeNSView(context: Context) -> TrackingView {
+        let view = TrackingView()
+        view.onChange = onChange
+        return view
+    }
+    func updateNSView(_ view: TrackingView, context: Context) { view.onChange = onChange }
+    final class TrackingView: NSView {
+        var onChange: ((Bool) -> Void)?
+        private var tracking: NSTrackingArea?
+        override func updateTrackingAreas() {
+            if let tracking { removeTrackingArea(tracking) }
+            let area = NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self)
+            addTrackingArea(area); tracking = area
+            super.updateTrackingAreas()
+        }
+        override func mouseEntered(with event: NSEvent) { onChange?(true) }
+        override func mouseExited(with event: NSEvent) { onChange?(false) }
+    }
+}
+
+private struct PeopleTagScrollBridge: NSViewRepresentable {
+    var command: PeopleTagScrollCommand?
+    var onScroll: (CGFloat) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        sync(view, coordinator: context.coordinator)
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        sync(nsView, coordinator: context.coordinator)
+    }
+
+    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
+        coordinator.disconnect()
+    }
+
+    private func sync(_ view: NSView, coordinator: Coordinator) {
+        coordinator.onScroll = onScroll
+        coordinator.command = command
+        DispatchQueue.main.async { [weak view, weak coordinator] in
+            var current: NSView? = view
+            while let candidate = current {
+                if let scroll = candidate as? NSScrollView {
+                    coordinator?.connect(to: scroll)
+                    return
+                }
+                current = candidate.superview
+            }
+        }
+    }
+
+    final class Coordinator {
+        var onScroll: ((CGFloat) -> Void)?
+        var command: PeopleTagScrollCommand?
+        private weak var scrollView: NSScrollView?
+        private var boundsObserver: NSObjectProtocol?
+        private var lastCommandID: UUID?
+
+        func connect(to scroll: NSScrollView) {
+            if scrollView !== scroll {
+                disconnect()
+                scrollView = scroll
+                let clip = scroll.contentView
+                clip.postsBoundsChangedNotifications = true
+                boundsObserver = NotificationCenter.default.addObserver(forName: NSView.boundsDidChangeNotification, object: clip, queue: .main) { [weak self] _ in
+                    // Native gestures and ScrollViewReader are the source of truth.
+                    // Never write the observed offset back to the clip view.
+                    DispatchQueue.main.async { [weak self] in self?.publishOffset() }
+                }
+            }
+            if let command, command.id != lastCommandID {
+                lastCommandID = command.id
+                let clip = scroll.contentView
+                let maximum = max(0, (scroll.documentView?.bounds.width ?? 0) - clip.bounds.width)
+                let x = min(max(0, command.offset), maximum)
+                clip.scroll(to: NSPoint(x: x, y: clip.bounds.minY))
+                scroll.reflectScrolledClipView(clip)
+            }
+            publishOffset()
+        }
+
+        private func publishOffset() {
+            guard let scroll = scrollView else { return }
+            let maximum = max(0, (scroll.documentView?.bounds.width ?? 0) - scroll.contentView.bounds.width)
+            onScroll?(min(max(0, scroll.contentView.bounds.minX), maximum))
+        }
+
+        func disconnect() {
+            if let boundsObserver { NotificationCenter.default.removeObserver(boundsObserver) }
+            boundsObserver = nil
+            scrollView = nil
+        }
+
+        deinit { disconnect() }
     }
 }
 

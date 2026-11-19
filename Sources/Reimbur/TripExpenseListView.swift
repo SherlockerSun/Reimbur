@@ -36,6 +36,14 @@ struct TripExpenseListView: View {
     var remove: (UUID) -> Void
     var files = ExpenseFileActions()
     @State private var sortingColumn: String?
+    @Binding var batchMode: Bool
+    @Binding var selectedExpenses: Set<UUID>
+    init(claim: Binding<Claim>, kind: ExpenseKind, remove: @escaping (UUID) -> Void,
+         files: ExpenseFileActions = ExpenseFileActions(), batchMode: Binding<Bool> = .constant(false),
+         selectedExpenses: Binding<Set<UUID>> = .constant([])) {
+        _claim = claim; self.kind = kind; self.remove = remove; self.files = files
+        _batchMode = batchMode; _selectedExpenses = selectedExpenses
+    }
     private var expenses: [Expense] {
         let rows = claim.expenses.filter { $0.kind == kind }
         return kind == .train && sortingColumn == nil ? RailMoment.ordered(rows) : rows
@@ -44,8 +52,12 @@ struct TripExpenseListView: View {
         VStack(spacing: 14) {
             ReimbursementTable(id: "trip.\(kind.id)", columns: TripExpenseColumns.columns(for: kind), rows: expenses,
                                rowHeight: TripExpenseColumns.rowHeight,
-                               sort: { sortingColumn = $1 == nil ? nil : $0; claim.sortExpenses(kind, column: $0, ascending: $1) }) { expense, index, column in
-                TripExpenseCell(claim: $claim, expense: expense, number: index + 1, column: column, files: files, remove: { remove(expense.id) })
+                               sort: { sortingColumn = $1 == nil ? nil : $0; claim.sortExpenses(kind, column: $0, ascending: $1) },
+                               selectable: batchMode, selectedIDs: $selectedExpenses) { expense, index, column in
+                TripExpenseCell(claim: $claim, expense: expense, number: index + 1, column: column, files: files,
+                                batchMode: batchMode, selected: selectedExpenses.contains(expense.id), toggleSelection: { value in
+                                    if value { selectedExpenses.insert(expense.id) } else { selectedExpenses.remove(expense.id) }
+                                }, remove: { remove(expense.id) })
             }.id(kind.id)
             if let group = claim.expenseGroups.first(where: { $0.kind == kind }) {
                 HStack {
@@ -56,6 +68,8 @@ struct TripExpenseListView: View {
             }
         }.onChange(of: kind) { _, _ in sortingColumn = nil }
             .onChange(of: claim.id) { _, _ in sortingColumn = nil }
+            .onChange(of: expenses.map(\.id)) { _, ids in selectedExpenses = selectedExpenses.intersection(Set(ids)) }
+            .onChange(of: batchMode) { _, enabled in if !enabled { selectedExpenses.removeAll() } }
     }
 }
 
@@ -65,6 +79,9 @@ private struct TripExpenseCell: View {
     var number: Int
     var column: ReimbursementColumn
     var files: ExpenseFileActions
+    var batchMode: Bool
+    var selected: Bool
+    var toggleSelection: (Bool) -> Void
     var remove: () -> Void
     private var current: Expense { claim.expenses.first { $0.id == expense.id } ?? expense }
     private var names: [String] {
@@ -81,6 +98,13 @@ private struct TripExpenseCell: View {
     var body: some View {
         Group {
             switch column.id {
+            case "sequence":
+                if batchMode {
+                    Toggle("选择第\(number)行", isOn: Binding(get: { selected }, set: toggleSelection))
+                        .toggleStyle(.checkbox).labelsHidden().accessibilityLabel("选择第\(number)行")
+                } else {
+                    Text("\(number)").monospacedDigit().foregroundStyle(Palette.muted).font(.system(size: 11))
+                }
             case "departure": RailDateField(value: field(\.departureTime), title: "出发日期", fallbackDate: claim.dates.sorted().first.flatMap(DayKey.date) ?? claim.createdAt)
             case "arrival": RailDateField(value: Binding(get: { current.effectiveArrivalDate }, set: { value in
                 field(\.arrivalTime).wrappedValue = RailMoment.dayKey(value) == RailMoment.dayKey(current.departureTime) ? nil : value

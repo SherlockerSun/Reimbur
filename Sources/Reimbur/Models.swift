@@ -7,10 +7,17 @@ enum ClaimStatus: String, Codable, CaseIterable, Identifiable {
 
 enum ClaimKind: String, Codable, CaseIterable, Identifiable {
     case trip = "出差", meal = "餐补", allowance = "补助"
-    var displayName: String { self == .allowance ? "补贴" : rawValue }
+    // Keep the stored value for compatibility with existing records while showing the new name.
+    var displayName: String {
+        switch self {
+        case .meal: return "计日"
+        case .allowance: return "其他"
+        default: return rawValue
+        }
+    }
     var id: String { rawValue }
     var icon: String {
-        switch self { case .trip: return "suitcase.rolling"; case .meal: return "fork.knife"; case .allowance: return "banknote" }
+        switch self { case .trip: return "suitcase.rolling"; case .meal: return "calendar"; case .allowance: return "banknote" }
     }
     var categories: [ExpenseKind] {
         switch self {
@@ -21,9 +28,15 @@ enum ClaimKind: String, Codable, CaseIterable, Identifiable {
     }
 }
 
-enum ExpenseKind: String, Codable, CaseIterable, Identifiable {
+enum ExpenseKind: String, Codable, CaseIterable, Identifiable, Hashable {
     case subsidy = "出差补助", train = "火车", flight = "飞机", taxi = "打车", hotel = "住宿", meal = "餐补", allowance = "补助"
-    var displayName: String { self == .allowance ? "补贴" : rawValue }
+    var displayName: String {
+        switch self {
+        case .meal: return "计日"
+        case .allowance: return "其他"
+        default: return rawValue
+        }
+    }
     var id: String { rawValue }
     var icon: String {
         switch self {
@@ -32,7 +45,7 @@ enum ExpenseKind: String, Codable, CaseIterable, Identifiable {
         case .flight: return "airplane"
         case .taxi: return "car.fill"
         case .hotel: return "bed.double.fill"
-        case .meal: return "fork.knife"
+        case .meal: return "calendar"
         }
     }
     var isTransport: Bool { [.train, .flight, .taxi].contains(self) }
@@ -285,6 +298,7 @@ struct Claim: Codable, Identifiable, Equatable {
         claim.expenses = [Expense(kind: kind.categories[0])]
         if kind != .trip { claim.invoiceLedgerEntries = [] }
         if kind == .allowance { claim.allowanceAmount = 0 }
+        if kind == .meal { claim.reimbursementPurpose = UserDefaults.standard.string(forKey: "defaultMealPurpose") ?? "招待费" }
         return claim
     }
     // Legacy aggregate subsidies are expanded once; originals and attachments stay on the first row.
@@ -324,7 +338,8 @@ struct Claim: Codable, Identifiable, Equatable {
     }
     var ledgerPurpose: String {
         switch kind {
-        case .meal: return "餐补报销"
+        // Older meal claims had a fixed purpose and no stored value; keep that value for compatibility.
+        case .meal: return reimbursementPurpose == "餐补报销" ? "计日报销" : (reimbursementPurpose ?? "计日报销")
         case .trip: return tripPurpose ?? ""
         case .allowance: return reimbursementPurpose ?? ""
         }
@@ -400,6 +415,10 @@ struct Claim: Codable, Identifiable, Equatable {
     }
     var reimbursementDayCount: Int { kind == .allowance ? 0 : personBreakdowns.map { $0.days(in: self) }.max() ?? dates.count }
     var recordDetail: String { (kind == .allowance ? "" : "\(reimbursementDayCount)天 · ") + "\(travelerCount)人 · \(kind != .trip ? invoiceLedgerEntries?.count ?? expenses.count : expenses.count)笔 · \(invoiceCount)份发票" }
+    var recordListDetail: String {
+        let claimant = travelerNames?.first ?? expenses.compactMap(\.claimant).first ?? "未填写"
+        return "\(claimant)·\(recordDetail)"
+    }
     var reimbursementDates: Set<String> {
         if kind == .allowance { return [] }
         let resolved = personBreakdowns.reduce(into: Set<String>()) { $0.formUnion($1.dates(in: self)) }

@@ -7,6 +7,7 @@ const { promisify } = require('util');
 const initSqlJs = require('sql.js');
 const XLSX = require('xlsx');
 const archiver = require('archiver');
+const Tesseract = require('tesseract.js');
 const {
   Document, Packer, Paragraph, ImageRun, Table, TableRow, TableCell,
   WidthType, AlignmentType, BorderStyle, VerticalAlign
@@ -17,6 +18,7 @@ let database = null;
 let databasePath = '';
 let attachmentRoot = '';
 let sqlModulePromise = null;
+let ocrWorkerPromise = null;
 const execFileAsync = promisify(execFile);
 
 function dataRoot() {
@@ -41,6 +43,37 @@ function sqlWasmPath() {
 async function getSql() {
   if (!sqlModulePromise) sqlModulePromise = initSqlJs({ locateFile: () => sqlWasmPath() });
   return sqlModulePromise;
+}
+
+function ocrLanguagePath() {
+  const packaged = path.join(process.resourcesPath, 'app.asar.unpacked', 'electron', 'ocr-lang');
+  return fs.existsSync(packaged) ? packaged : path.join(__dirname, 'ocr-lang');
+}
+
+function ocrWorkerPath() {
+  const packaged = path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', 'tesseract.js', 'src', 'worker-script', 'node', 'index.js');
+  return fs.existsSync(packaged) ? packaged : path.join(__dirname, '..', 'node_modules', 'tesseract.js', 'src', 'worker-script', 'node', 'index.js');
+}
+
+function ocrCachePath() {
+  const cache = path.join(app.getPath('userData'), 'ocr-cache');
+  fs.mkdirSync(cache, { recursive: true });
+  return cache;
+}
+
+async function getOcrWorker() {
+  if (!ocrWorkerPromise) {
+    ocrWorkerPromise = Tesseract.createWorker(['chi_sim', 'eng'], 1, {
+      langPath: ocrLanguagePath(),
+      workerPath: ocrWorkerPath(),
+      cachePath: ocrCachePath(),
+      logger: () => {}
+    }).catch(error => {
+      ocrWorkerPromise = null;
+      throw error;
+    });
+  }
+  return ocrWorkerPromise;
 }
 
 async function persistDatabase() {
@@ -114,6 +147,10 @@ function mimeFor(file) {
     case '.webp': return 'image/webp';
     case '.gif': return 'image/gif';
     case '.bmp': return 'image/bmp';
+    case '.tif':
+    case '.tiff': return 'image/tiff';
+    case '.heic': return 'image/heic';
+    case '.heif': return 'image/heif';
     default: return 'application/octet-stream';
   }
 }
@@ -225,40 +262,83 @@ function registerIpc() {
 
   ipcMain.handle('attachment:import', async (_event, options = {}) => {
     const extensions = options.itineraryOnly
-      ? ['pdf', 'png', 'jpg', 'jpeg', 'webp']
-      : ['pdf', 'png', 'jpg', 'jpeg', 'webp', 'bmp'];
-    const result = await dialog.showOpenDialog(mainWindow, {
+      ? ['pdf', 'png', 'jpg', 'jpeg', 'webp', 'gif', 'tif', 'tiff', 'heic', 'heif']
+      : ['pdf', 'png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'tif', 'tiff', 'heic', 'heif'];
+    const owner = BrowserWindow.getFocusedWindow() || mainWindow;
+    const result = await dialog.showOpenDialog(owner, {
       title: options.title || '导入发票',
       properties: ['openFile', 'multiSelections'],
       filters: [{ name: '发票与行程单', extensions }]
     });
     if (result.canceled) return [];
     const imported = [];
-    for (const source of result.filePaths) {
-      const id = uuid();
-      const original = path.basename(source);
-      const folder = path.join(attachmentRoot, id);
-      await fsp.mkdir(folder, { recursive: true });
-      const storedName = `${id}/${original}`;
-      await fsp.copyFile(source, path.join(attachmentRoot, storedName));
-      imported.push({
-        id,
-        name: original,
-        storedName,
-        amount: 0,
-        pageCount: 1,
-        number: null,
-        sourceName: original,
-        mime: mimeFor(source)
-      });
+    const createdFolders = [];
+    try {
+      for (const source of result.filePaths) {
+        const id = uuid();
+        const original = path.basename(source);
+        const folder = path.join(attachmentRoot, id);
+        await fsp.mkdir(folder, { recursive: true });
+        createdFolders.push(folder);
+        const storedName = `${id}/${original}`;
+        await fsp.copyFile(source, path.join(attachmentRoot, storedName));
+        imported.push({
+          id,
+          name: original,
+          storedName,
+          amount: 0,
+          pageCount: 1,
+          number: null,
+          sourceName: original,
+          mime: mimeFor(source)
+        });
+      }
+      return imported;
+    } catch (error) {
+      await Promise.allSettled(createdFolders.map(folder => fsp.rm(folder, { recursive: true, force: true })));
+      throw error;
     }
-    return imported;
   });
 
   ipcMain.handle('attachment:read', async (_event, storedName) => {
     const file = insideAttachmentRoot(storedName);
     if (!file || !fs.existsSync(file)) throw new Error('附件文件不存在，可能已被移动或删除。');
-    return { data: await fsp.readFile(file), mime: mimeFor(file), name: path.basename(file) };
+    const mime = mimeFor(file);
+    let previewDataUrl = null;
+    if (/^image\//.test(mime)) {
+      const image = nativeImage.createFromPath(file);
+      if (!image.isEmpty()) previewDataUrl = image.toDataURL();
+    }
+    return { data: await fsp.readFile(file), mime, name: path.basename(file), previewDataUrl };
+  });
+
+  ipcMain.handle('attachment:ocr', async (_event, payload = {}) => {
+    const images = (payload.images || []).filter(image => /^data:image\//.test(String(image)));
+    const storedFile = payload.storedName ? insideAttachmentRoot(payload.storedName) : null;
+    if (!images.length && (!storedFile || !fs.existsSync(storedFile))) throw new Error('没有可供识别的图片或 PDF 页面。');
+    try {
+      const worker = await getOcrWorker();
+      const pages = [];
+      if (storedFile) {
+        let result = await worker.recognize(storedFile);
+        if (!result?.data?.text) {
+          const image = nativeImage.createFromPath(storedFile);
+          if (!image.isEmpty()) result = await worker.recognize(image.toPNG());
+        }
+        if (result?.data?.text) pages.push(result.data.text);
+      }
+      for (const image of images.slice(0, 2)) {
+        const bytes = Buffer.from(String(image).split(',')[1] || '', 'base64');
+        const result = await worker.recognize(bytes);
+        if (result?.data?.text) pages.push(result.data.text);
+      }
+      return pages.join('\n');
+    } catch (error) {
+      const worker = await ocrWorkerPromise?.catch(() => null);
+      ocrWorkerPromise = null;
+      await worker?.terminate().catch(() => {});
+      throw error;
+    }
   });
 
   ipcMain.handle('attachment:duplicate', async (_event, storedName) => {
@@ -411,4 +491,7 @@ app.whenReady().then(async () => {
 });
 
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
-app.on('before-quit', () => { try { database?.close(); } catch (_) {} });
+app.on('before-quit', () => {
+  try { database?.close(); } catch (_) {}
+  ocrWorkerPromise?.then(worker => worker.terminate()).catch(() => {});
+});

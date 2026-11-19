@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld('reimbur', {
   openExternal: url => ipcRenderer.invoke('system:open-external', url),
   importAttachments: options => ipcRenderer.invoke('attachment:import', options),
   readAttachment: storedName => ipcRenderer.invoke('attachment:read', storedName),
+  recognizeImages: payload => ipcRenderer.invoke('attachment:ocr', payload),
   duplicateAttachment: storedName => ipcRenderer.invoke('attachment:duplicate', storedName),
   copyAttachmentFile: storedName => ipcRenderer.invoke('attachment:copy-file', storedName),
   deleteAttachment: storedName => ipcRenderer.invoke('attachment:delete', storedName),

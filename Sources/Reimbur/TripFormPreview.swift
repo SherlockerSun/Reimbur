@@ -2,11 +2,8 @@ import SwiftUI
 
 struct TripFormPreview: View {
     var claim: Claim
-    @State private var selectedPerson: String?
     var close: () -> Void = {}
     @State private var command = FormPreviewCommand(action: .fit)
-    private var people: [PersonBreakdown] { claim.personBreakdowns }
-    private var person: PersonBreakdown? { people.first { $0.id == selectedPerson } ?? people.first }
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
@@ -16,20 +13,9 @@ struct TripFormPreview: View {
                 PreviewIconButton(title: "放大", icon: "plus.magnifyingglass") { command = FormPreviewCommand(action: .zoomIn) }
                 PreviewIconButton(title: "适应窗口", icon: "arrow.down.right.and.arrow.up.left") { command = FormPreviewCommand(action: .fit) }
             }.padding(.trailing, 38)
-            if people.count > 1 {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
-                        ForEach(people) { item in
-                            Button { selectedPerson = item.id } label: {
-                                Text(item.name).font(.system(size: 12, weight: .medium)).padding(.horizontal, 16).padding(.vertical, 7)
-                                    .foregroundStyle(person?.id == item.id ? Palette.accent : Palette.muted)
-                                    .background(person?.id == item.id ? Palette.accent.opacity(0.10) : .white, in: RoundedRectangle(cornerRadius: 7))
-                            }.buttonStyle(.plain)
-                        }
-                    }
-                }
-            }
-            InteractiveTripForm(data: TripFormData(claim: claim, person: person), command: command, close: close)
+            Text("出差人：" + (claim.travelerNames ?? []).joined(separator: "、"))
+                .font(.system(size: 11)).foregroundStyle(Palette.muted)
+            InteractiveTripForm(data: TripFormData(claim: claim), command: command, close: close)
                 .clipShape(RoundedRectangle(cornerRadius: 9))
             Text("滚轮缩放 · 拖动空白处或按住空格平移 · 拖选文字后 ⌘C 复制")
                 .font(.system(size: 10)).foregroundStyle(Palette.muted)

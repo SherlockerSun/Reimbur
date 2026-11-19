@@ -561,7 +561,12 @@ final class ReimburChecks {
         try captureView(TripFormPreview(claim: claim).background(Palette.canvas).tint(Palette.accent), width: 1000, height: 740, to: qa.appendingPathComponent("trip-form-preview.png")) { window, host in
             nativeClick(NSPoint(x: 114, y: host.isFlipped ? 74 : host.bounds.height - 74), in: host, window: window)
         }
-        var many = tripFormFixture(); many.expenses += many.expenses.filter { $0.kind == .train }.map { row in var row = row; row.id = UUID(); return row }
+        var many = tripFormFixture(); many.expenses += many.expenses.filter { $0.kind == .train }.map { row in
+            var row = row; row.id = UUID()
+            row.departureTime = row.departureTime?.replacingOccurrences(of: "2026-10", with: "2026-11")
+            row.arrivalTime = row.departureTime
+            return row
+        }
         many.tripPurpose = String(repeating: "智能制造项目现场实施与调试、", count: 4); many.note = "现场对接，完成测试后返程。"
         let manyData = TripFormData(claim: many)
         expectEqual(manyData.rowCount, 12)
@@ -569,6 +574,55 @@ final class ReimburChecks {
         var empty = Claim.make(.trip); empty.expenses = []
         expectEqual(TripFormData(claim: empty).total, 0)
         expectEqual(TripFormData(claim: empty).rowCount, 7)
+    }
+
+    @MainActor func testTripFormMergesMatchingTrainTickets() throws {
+        var claim = Claim.make(.trip)
+        claim.setTravelerNames(["张三", "李四"])
+        func ticket(_ name: String, _ date: String?, origin: String = "杭州", destination: String = "宁波", kind: ExpenseKind = .train) -> Expense {
+            Expense(kind: kind, unitPrice: 7700, origin: origin, destination: destination,
+                    departureTime: date, invoices: [Attachment(name: name + ".pdf", storedName: UUID().uuidString + ".pdf", amount: 7700)], claimant: name)
+        }
+        let first = ticket("张三", "2026-11-12 08:00", origin: "杭州东")
+        let second = ticket("李四", "2026-11-12 18:00")
+        claim.expenses = [first, second]
+        let original = claim
+        let data = TripFormData(claim: claim)
+        expectEqual(data.legs.count, 1)
+        expectEqual(data.legs[0].originCity, "杭州")
+        expectEqual(data.legs[0].destinationCity, "宁波")
+        expectEqual(data.legs[0].invoices.count, 2)
+        expectEqual(data.legs[0].total(in: claim), 15400)
+        expectEqual(data.fare, data.total)
+        expectEqual(data.invoiceCount, 2)
+        expectEqual(claim, original)
+        let paper = TripFormPaper(data: data)
+        let row = paper.cells.filter { $0.rect.minY == 214 }
+        expectEqual(row[9].text, "2")
+        expectEqual(row[10].text, "154.00")
+        expectTrue(TripFormPDF.document(data)?.string?.contains("154.00") == true)
+        expectTrue(claim.personBreakdowns.allSatisfy { TripFormData(claim: claim, person: $0).fare == 7700 })
+
+        var adjusted = second; adjusted.setTotalAmount(6000)
+        claim.expenses = [first, second, adjusted]
+        let three = TripFormData(claim: claim)
+        expectEqual(three.legs.count, 1)
+        expectEqual(three.legs[0].invoices.count, 3)
+        expectEqual(three.fare, 21400)
+        expectEqual(three.fare, claim.total)
+
+        var overnight = second; overnight.arrivalTime = "2026-11-13"
+        claim.expenses = [first, second, overnight,
+                          ticket("张三", "2026-11-13"),
+                          ticket("张三", "2026-11-12", origin: "宁波", destination: "杭州"),
+                          ticket("张三", "2026-11-12", destination: "上海"),
+                          ticket("张三", "2026-11-12", kind: .flight), ticket("李四", "2026-11-12", kind: .flight),
+                          ticket("张三", nil), ticket("李四", nil),
+                          ticket("张三", "2026-11-12", origin: ""), ticket("李四", "2026-11-12", origin: "")]
+        let distinct = TripFormData(claim: claim)
+        expectEqual(distinct.legs.count, claim.expenses.count - 1)
+        expectEqual(distinct.fare, claim.total)
+        expectEqual(distinct.legs.reduce(0) { $0 + $1.invoices.count }, claim.invoiceCount)
     }
 
     @MainActor func testTripFormNativeEditorAndTimeSelection() throws {
@@ -648,6 +702,126 @@ final class ReimburChecks {
             activePopover.sendEvent(enter); pumpNativeEvents()
             expectEqual(state.claim.expenses.first { $0.id == firstID }?.departureTime, "2026-10-07")
         }
+    }
+
+    func testReimbursementPaginationBounds() {
+        let first = ReimbursementPage(total: 53, page: 1, size: 5)
+        expectEqual(first.range, 0..<5)
+        expectEqual(first.count, 11)
+        let last = ReimbursementPage(total: 53, page: 3, size: 20)
+        expectEqual(last.range, 40..<53)
+        let deleted = ReimbursementPage(total: 40, page: 3, size: 20)
+        expectEqual(deleted.number, 2)
+        expectEqual(deleted.range, 20..<40)
+        let custom = ReimbursementPage(total: 53, page: 2, size: 7)
+        expectEqual(custom.range, 7..<14)
+        expectEqual(custom.count, 8)
+        expectEqual(ReimbursementPage(total: 0, page: 99, size: 0).range, 0..<0)
+        expectEqual(ReimbursementPage(total: 20, page: 2, size: 20).number, 1)
+    }
+
+    @MainActor func testPaginationDefaultsToFive() throws {
+        let suite = "Reimbur-pagination-default-\(UUID())", defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        var claim = Claim.make(.trip)
+        claim.expenses = (0..<12).map { Expense(kind: .subsidy, unitPrice: 100, note: "费用\($0 + 1)") }
+        let state = TripListState(claim)
+        try captureView(SubsidyListInteractionView(state: state).defaultAppStorage(defaults), width: 1050, height: 620,
+                        to: temporary.appendingPathComponent("default-pagination.png")) { _, host in
+            guard let field = verificationViews(host, NSComboBox.self).first else { fail("Default page-size field missing"); return }
+            expectEqual(field.stringValue, "5")
+            expectEqual(verificationViews(host, NSTextField.self).filter { $0.placeholderString == "填写备注" }.count, 5)
+        }
+    }
+
+    @MainActor func testPagedExpenseAndLedgerRendering() throws {
+        let suite = "Reimbur-pagination-\(UUID())", defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(3, forKey: "reimbursement.pageSize.v2.trip.出差补助")
+        defaults.set(7, forKey: "reimbursement.pageSize.v2.ledger.餐补")
+        var trip = Claim.make(.trip)
+        trip.expenses = (0..<25).map { Expense(kind: .subsidy, unitPrice: 100, note: "费用\($0 + 1)") }
+        let tripState = TripListState(trip)
+        let qa = ProcessInfo.processInfo.environment["REIMBUR_QA_DIR"].map { URL(fileURLWithPath: $0) } ?? temporary!
+        try captureView(SubsidyListInteractionView(state: tripState).defaultAppStorage(defaults), width: 1050, height: 500,
+                        to: qa.appendingPathComponent("expense-pagination.png")) { _, host in
+            let notes = verificationViews(host, NSTextField.self).filter { $0.placeholderString == "填写备注" }
+            expectEqual(notes.count, 3)
+            expectEqual(notes.map(\.stringValue), ["费用1", "费用2", "费用3"])
+            defaults.set(5, forKey: "reimbursement.pageSize.v2.trip.出差补助"); pumpNativeEvents(0.3)
+            expectEqual(verificationViews(host, NSTextField.self).filter { $0.placeholderString == "填写备注" }.count, 5)
+            guard let field = verificationViews(host, NSComboBox.self).first else { fail("Page-size input missing"); return }
+            field.stringValue = "4"
+            field.delegate?.controlTextDidEndEditing?(Notification(name: NSControl.textDidEndEditingNotification, object: field))
+            pumpNativeEvents(0.3)
+            expectEqual(defaults.integer(forKey: "reimbursement.pageSize.v2.trip.出差补助"), 4)
+            expectEqual(verificationViews(host, NSTextField.self).filter { $0.placeholderString == "填写备注" }.count, 4)
+            field.selectItem(at: 0)
+            field.delegate?.comboBoxSelectionDidChange?(Notification(name: NSComboBox.selectionDidChangeNotification, object: field))
+            pumpNativeEvents(0.3)
+            expectEqual(defaults.integer(forKey: "reimbursement.pageSize.v2.trip.出差补助"), 5)
+            expectEqual(tripState.claim.expenses.count, 25)
+        }
+        var meal = Claim.make(.meal)
+        meal.expenses[0].invoices = (0..<25).map { Attachment(name: "发票\($0).pdf", storedName: "file\($0)", amount: 100) }
+        meal.invoiceLedgerEntries = nil
+        meal = meal.withInvoiceLedger
+        let store = ClaimStore(root: temporary.appendingPathComponent("db"))
+        let mealState = TripListState(meal)
+        try captureView(InlineLedgerInteractionView(state: mealState, store: store).defaultAppStorage(defaults), width: 1400, height: 850,
+                        to: qa.appendingPathComponent("ledger-pagination.png")) { _, host in
+            expectEqual(verificationViews(host, NSTextField.self).filter { $0.placeholderString == "发票号码" }.count, 7)
+            expectEqual(mealState.claim.invoiceCount, 25)
+            expectEqual(mealState.claim.invoiceTotal, 2500)
+        }
+    }
+
+    @MainActor func testAutomaticMixedInvoiceImport() throws {
+        let store = ClaimStore(root: temporary.appendingPathComponent("db"))
+        var claim = Claim.make(.trip); claim.expenses = []; claim.setTravelerNames(["张三"])
+        let documents: [(String, [String])] = [
+            ("A.pdf", ["电子发票（铁路电子客票）", "发票号码：12345678901234567890", "出发站：杭州东", "到达站：宁波", "票价 ¥69.00"]),
+            ("B.pdf", ["电子发票（航空运输电子客票行程单）", "发票号码：12345678901234567891", "价税合计 ¥800.00"]),
+            ("C.pdf", ["电子发票（普通发票）", "*运输服务*客运服务", "发票号码：12345678901234567892", "价税合计 ¥38.00"]),
+            ("D.pdf", ["电子发票（普通发票）", "*住宿服务*客房", "发票号码：12345678901234567893", "价税合计 ¥300.00"]),
+            ("E.pdf", ["打车行程单", "发票号码：12345678901234567892", "合计金额 ¥999.00"])
+        ]
+        let sources = try documents.map { name, lines -> URL in
+            let url = temporary.appendingPathComponent(name)
+            try makeTripImportPDF(url, lines: lines)
+            return url
+        }
+        claim = try store.importAllInvoices(Array(sources.reversed()), into: claim)
+        expectEqual(claim.invoiceCount, 4)
+        expectEqual(claim.invoiceTotal, 120700)
+        expectEqual(claim.total, 120700)
+        expectEqual(Set(claim.expenses.map(\.kind)), Set([.train, .flight, .taxi, .hotel]))
+        expectEqual(claim.invoiceLedgerRows.count, 4)
+        expectEqual(claim.expenses.first { $0.kind == .taxi }?.itineraries?.count, 1)
+        expectEqual(claim.expenses.first { $0.kind == .train }?.origin, "杭州")
+        expectEqual(ClaimStore(root: store.root).claims.first { $0.id == claim.id }?.expenses, claim.expenses)
+        let directory = store.root.appendingPathComponent("Attachments")
+        let before = try FileManager.default.contentsOfDirectory(atPath: directory.path).sorted()
+        let unknown = temporary.appendingPathComponent("未识别.pdf")
+        try makeTripImportPDF(unknown, lines: ["电子发票（普通发票）", "发票号码：12345678901234567894", "价税合计 ¥12.00"])
+        expectThrowsError(try store.importAllInvoices([sources[0], unknown], into: claim))
+        expectEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path).sorted(), before)
+        let fallback = try store.importAllInvoices([unknown], into: claim, fallbackKind: .taxi)
+        expectEqual(fallback.invoiceCount, 5)
+        expectEqual(fallback.expenses.last?.kind, .taxi)
+        // All category groups must roll back together when the final save fails.
+        var deleted = Claim.make(.trip); deleted.expenses = []
+        expectTrue(store.save(deleted)); expectTrue(store.delete(deleted))
+        let beforeFailure = try FileManager.default.contentsOfDirectory(atPath: directory.path).sorted()
+        expectThrowsError(try store.importAllInvoices(sources, into: deleted))
+        expectEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path).sorted(), beforeFailure)
+        expectFalse(ClaimStore(root: store.root).claims.contains { $0.id == deleted.id })
+        // Meal reimbursements remain independent of all imported invoice amounts.
+        var meal = Claim.make(.meal); meal.dates = ["2026-11-06"]; meal.expenses[0].unitPrice = 3000
+        meal = try store.importAllInvoices([sources[0], sources[3]], into: meal)
+        expectEqual(meal.total, 3000)
+        expectEqual(meal.invoiceCount, 2)
+        expectEqual(meal.invoiceTotal, 36900)
     }
 
     @MainActor func testTripMixedBatchImportAndRollback() throws {
@@ -2574,6 +2748,65 @@ final class ReimburChecks {
         }
     }
 
+    @MainActor func testNativePeopleScrollbarTracksAndHides() throws {
+        let state = InteractionState()
+        state.names = (1...12).map { "报销人\($0)" }
+        let view = VStack {
+            PeopleTagInput(names: Binding(get: { state.names }, set: { state.names = $0 }))
+            Spacer()
+        }.padding(20).frame(width: 500, height: 140).background(.white)
+        let qa = ProcessInfo.processInfo.environment["REIMBUR_QA_DIR"].map { URL(fileURLWithPath: $0) } ?? temporary!
+        try captureView(view, width: 500, height: 140, to: qa.appendingPathComponent("people-scrollbar.png")) { window, host in
+            @MainActor func scrollView(_ view: NSView) -> NSScrollView? {
+                if let scroll = view as? NSScrollView { return scroll }
+                return view.subviews.lazy.compactMap { scrollView($0) }.first
+            }
+            guard let scroll = scrollView(host), let document = scroll.documentView else { fail("Missing people scroll view"); return }
+            let rect = host.convert(scroll.bounds, from: scroll)
+            let barY = host.isFlipped ? rect.maxY + 6 : rect.minY - 6
+            @MainActor func thumbCenter() -> CGFloat? {
+                host.layoutSubtreeIfNeeded()
+                let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds)!
+                host.cacheDisplay(in: host.bounds, to: bitmap)
+                let scale = CGFloat(bitmap.pixelsWide) / host.bounds.width
+                let y = Int((host.isFlipped ? barY : host.bounds.height - barY) * scale)
+                let pixels = (Int((rect.minX + 4) * scale)..<Int((rect.maxX - 4) * scale)).filter { x in
+                    guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { return false }
+                    return (color.redComponent + color.greenComponent + color.blueComponent) / 3 < 0.85
+                }
+                guard let first = pixels.first, let last = pixels.last else { return nil }
+                return CGFloat(first + last) / (2 * scale)
+            }
+            @MainActor func expectThumbMatchesContent() {
+                guard let center = thumbCenter() else { fail("Scrollbar should be visible"); return }
+                let track = rect.width - 4
+                let thumb = max(36, track * rect.width / document.bounds.width)
+                let maximum = document.bounds.width - scroll.contentView.bounds.width
+                let expected = rect.minX + 2 + thumb / 2 + scroll.contentView.bounds.minX / maximum * (track - thumb)
+                expectTrue(abs(center - expected) < 5)
+            }
+            window.acceptsMouseMovedEvents = true
+            window.makeFirstResponder(nil)
+            scroll.contentView.scroll(to: .zero); scroll.reflectScrolledClipView(scroll.contentView)
+            pumpNativeEvents(1.1)
+            expectNil(thumbCenter())
+
+            let wheel = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2, wheel1: 0, wheel2: -150, wheel3: 0)!
+            scroll.scrollWheel(with: NSEvent(cgEvent: wheel)!); pumpNativeEvents()
+            expectTrue(scroll.contentView.bounds.minX > 50)
+            expectThumbMatchesContent()
+            pumpNativeEvents(1.1); expectNil(thumbCenter())
+
+            let maximum = document.bounds.width - scroll.contentView.bounds.width
+            scroll.contentView.scroll(to: NSPoint(x: maximum, y: 0)); scroll.reflectScrolledClipView(scroll.contentView)
+            pumpNativeEvents(); expectThumbMatchesContent()
+            let start = thumbCenter() ?? rect.maxX - 20
+            nativeDrag(from: NSPoint(x: start, y: barY), to: NSPoint(x: rect.minX + 2, y: barY), in: host, window: window)
+            expectTrue(scroll.contentView.bounds.minX < 5)
+            pumpNativeEvents(1.1); expectNil(thumbCenter())
+        }
+    }
+
     func testDashboardSectorHoverHitTesting() {
         let plot = CGRect(x: 20, y: 30, width: 200, height: 200)
         let values: [Int64] = [100, 200, 100]
@@ -3329,9 +3562,10 @@ final class ReimburChecks {
                     RunLoop.current.run(until: Date().addingTimeInterval(0.005))
                 }
             }
-            click(NSPoint(x: 1152, y: 19))
+            // The record-list toggle sits on the left edge of the record pane.
+            click(NSPoint(x: 535, y: 19))
             expectTrue(defaults.bool(forKey: "recordsCollapsed"))
-            click(NSPoint(x: 1152, y: 19))
+            click(NSPoint(x: 224, y: 19))
             expectFalse(defaults.bool(forKey: "recordsCollapsed"))
             click(NSPoint(x: 80, y: 666))
             expectTrue(store.showSettings)
@@ -3575,6 +3809,10 @@ private func expectNoThrow<T>(_ action: @autoclosure () throws -> T, file: Stati
         NSApplication.shared.activate(ignoringOtherApps: true)
         let checks = ReimburChecks()
         let tests: [(String, () throws -> Void)] = [
+            ("Reimbursement pagination bounds", checks.testReimbursementPaginationBounds),
+            ("Pagination defaults to five", checks.testPaginationDefaultsToFive),
+            ("Paged expense and ledger rendering", checks.testPagedExpenseAndLedgerRendering),
+            ("Automatic mixed invoice import and atomic rollback", checks.testAutomaticMixedInvoiceImport),
             ("Manual route text is preserved", checks.testManualRouteTextIsPreserved),
             ("Zoomed previews stay inside viewport", checks.testZoomedPreviewsStayInsideViewport),
             ("Rail cities in lists forms and imports", checks.testRailCitiesInListsFormsAndImports),
@@ -3584,6 +3822,7 @@ private func expectNoThrow<T>(_ action: @autoclosure () throws -> T, file: Stati
             ("Rail arrival date defaults and overrides", checks.testRailArrivalDateDefaultsAndOverrides),
             ("Rail times defaults and SQLite compatibility", checks.testRailTimesDefaultsAndPersistence),
             ("Trip form reconciliation and rendering", checks.testTripFormReconciliationAndRendering),
+            ("Trip form merges matching train tickets", checks.testTripFormMergesMatchingTrainTickets),
             ("Trip form native editor and time selection", checks.testTripFormNativeEditorAndTimeSelection),
             ("Hover sorting centered cells and external scrollbar", checks.testHoverSortingCenteredCellsAndOverlayScrollbar),
             ("Centered tables adjacent resizing column sorting", checks.testCenteredTablesAdjacentResizeAndSorting),
@@ -3615,6 +3854,7 @@ private func expectNoThrow<T>(_ action: @autoclosure () throws -> T, file: Stati
             ("Native calendar cell corners and sweep", checks.testCalendarCellCornersAndSweep),
             ("Traveler rename retains expenses and persists", checks.testTravelerRenamePreservesExpenses),
             ("Native traveler double-click rename", checks.testNativeTravelerDoubleClickRename),
+            ("Native people scrollbar tracks and hides", checks.testNativePeopleScrollbarTracksAndHides),
             ("Dashboard sector hover hit testing", checks.testDashboardSectorHoverHitTesting),
             ("Native dashboard hover", checks.testNativeDashboardHover),
             ("Tooltip avoids selected marks and follows cursor", checks.testTooltipAvoidsMarksAndFollowsCursor),

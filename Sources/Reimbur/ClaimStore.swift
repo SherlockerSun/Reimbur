@@ -3,10 +3,122 @@ import SwiftUI
 import PDFKit
 import UniformTypeIdentifiers
 
+private final class ImportProgressBar: NSView {
+    var value: Double = 0 { didSet { needsDisplay = true } }
+    var completed = false { didSet { needsDisplay = true } }
+    var failed = false { didSet { needsDisplay = true } }
+    override func draw(_ dirtyRect: NSRect) {
+        let track = bounds.insetBy(dx: 0, dy: 1)
+        NSColor.systemGray.withAlphaComponent(0.16).setFill()
+        NSBezierPath(roundedRect: track, xRadius: track.height / 2, yRadius: track.height / 2).fill()
+        let fill = CGRect(x: track.minX, y: track.minY, width: track.width * min(max(value, 0), 1), height: track.height)
+        (failed ? NSColor.systemRed : completed ? NSColor.systemGreen : NSColor.systemBlue).setFill()
+        NSBezierPath(roundedRect: fill, xRadius: track.height / 2, yRadius: track.height / 2).fill()
+    }
+}
+
+private final class ClaimantImportPanelController: NSObject, NSWindowDelegate {
+    let panel: NSPanel
+    var onUpload: ((String) -> Void)?
+    var onCancel: (() -> Void)?
+    private let popup: NSComboBox
+    private let progress: ImportProgressBar
+    private let status: NSTextField
+
+    init(names: [String], kind: ClaimKind) {
+        panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 470, height: 300),
+                        styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        popup = NSComboBox(frame: NSRect(x: 36, y: 165, width: 398, height: 28))
+        progress = ImportProgressBar(frame: NSRect(x: 36, y: 132, width: 398, height: 8))
+        status = NSTextField(labelWithString: "")
+        super.init()
+        panel.delegate = self
+        panel.title = "选择报销人"
+        panel.isFloatingPanel = true
+        panel.level = .modalPanel
+        panel.hidesOnDeactivate = false
+        panel.hasShadow = true
+        panel.backgroundColor = .windowBackgroundColor
+
+        let content = NSView(frame: NSRect(x: 0, y: 0, width: 470, height: 300))
+        let title = NSTextField(labelWithString: "选择报销人")
+        title.font = .systemFont(ofSize: 20, weight: .semibold)
+        title.frame = NSRect(x: 36, y: 235, width: 398, height: 28)
+        let detail = NSTextField(labelWithString: "本次导入的发票将归入所选报销人。")
+        detail.font = .systemFont(ofSize: 13)
+        detail.textColor = .secondaryLabelColor
+        detail.lineBreakMode = .byWordWrapping
+        detail.maximumNumberOfLines = 2
+        detail.frame = NSRect(x: 36, y: 185, width: 398, height: 42)
+        popup.isEditable = true
+        popup.addItems(withObjectValues: names)
+        popup.stringValue = names.first ?? ""
+        popup.font = .systemFont(ofSize: 13)
+        popup.toolTip = "输入或选择报销人"
+        status.font = .systemFont(ofSize: 12)
+        status.textColor = .secondaryLabelColor
+        status.frame = NSRect(x: 36, y: 102, width: 398, height: 22)
+        status.isHidden = true
+        progress.isHidden = true
+        let upload = NSButton(title: "上传发票", target: self, action: #selector(uploadAction))
+        upload.bezelStyle = .rounded
+        upload.keyEquivalent = "\r"
+        upload.frame = NSRect(x: 234, y: 20, width: 96, height: 32)
+        let cancel = NSButton(title: "完成", target: self, action: #selector(cancelAction))
+        cancel.bezelStyle = .rounded
+        cancel.frame = NSRect(x: 338, y: 20, width: 96, height: 32)
+
+        [title, detail, popup, progress, status, cancel, upload].forEach { content.addSubview($0) }
+        panel.contentView = content
+        panel.center()
+    }
+
+    var selectedClaimant: String { popup.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) }
+    func setNames(_ names: [String]) {
+        let current = popup.stringValue
+        popup.removeAllItems()
+        popup.addItems(withObjectValues: names)
+        popup.stringValue = current
+    }
+    func beginProgress() {
+        progress.value = 0.06; progress.completed = false; progress.failed = false; progress.isHidden = false
+        status.stringValue = "正在识别并整理发票…"; status.textColor = .secondaryLabelColor; status.isHidden = false
+        panel.displayIfNeeded()
+    }
+    func updateProgress(_ value: Double) {
+        progress.value = value
+        panel.displayIfNeeded()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.004))
+    }
+    func completeProgress(message: String) {
+        progress.value = 1; progress.completed = true; progress.failed = false
+        status.stringValue = message; status.textColor = .systemGreen; status.isHidden = false
+        panel.displayIfNeeded()
+    }
+    func failProgress(message: String) {
+        progress.completed = false; progress.failed = true; progress.isHidden = false
+        status.stringValue = message; status.textColor = .systemRed; status.isHidden = false
+        panel.displayIfNeeded()
+    }
+    @objc private func uploadAction() {
+        let value = selectedClaimant
+        guard !value.isEmpty else {
+            status.stringValue = "请先填写或选择报销人"
+            status.textColor = .systemRed; status.isHidden = false
+            progress.isHidden = true
+            return
+        }
+        onUpload?(value)
+    }
+    @objc private func cancelAction() { onCancel?() }
+    func windowShouldClose(_ sender: NSWindow) -> Bool { onCancel?(); return false }
+}
+
 @MainActor final class ClaimStore: ObservableObject {
     @Published private(set) var claims: [Claim] = []
     @Published var errorMessage: String?
     @Published private(set) var ready = false
+    @Published var importSuccess: String?
     @Published var exporting = false
     @Published var exportSuccess: URL?
     @Published var preview: PreviewRequest?
@@ -28,6 +140,10 @@ import UniformTypeIdentifiers
     func previewTripForm(_ claim: Claim) {
         dismissPreview()
         recordPreview = .tripForm(claim)
+    }
+    func previewReimbursementForm(_ claim: Claim) {
+        dismissPreview()
+        recordPreview = .reimbursementForm(claim)
     }
     func dismissPreview() {
         preview = nil; recordPreview = nil; hoverPreview.clear()
@@ -64,6 +180,7 @@ import UniformTypeIdentifiers
         claim.setTravelerNames(defaults.travelerNames)
         claim.department = defaults.department
         if kind == .trip { claim.tripPurpose = defaults.tripPurpose }
+        if kind == .meal { claim.reimbursementPurpose = defaults.mealPurpose }
         return save(claim) ? claim.id : nil
     }
 
@@ -178,9 +295,16 @@ import UniformTypeIdentifiers
                             if let route = metadata.route { routes.insert(route) }
                             if let times = metadata.railTimes { railTimes.insert(times) }
                         }
-                    } else if role == .itinerary, let image = NSImage(contentsOf: source), image.isValid {
-                        attachment.number = AttachmentRecognition.read(image: image, source: source, role: role).number
-                    } else { throw ReimburError("\(source.lastPathComponent) 格式无效；发票请选择 PDF，行程单支持 PDF 或常见图片。") }
+                    } else if let image = NSImage(contentsOf: source), image.isValid {
+                        let metadata = AttachmentRecognition.read(image: image, source: source, role: role, kind: updated.expenses.first { $0.id == expenseID }?.kind)
+                        attachment.number = metadata.number
+                        if role == .invoice {
+                            attachment.amount = metadata.amount ?? 0
+                            recognizedAmount = recognizedAmount || metadata.amount != nil
+                            if let route = metadata.route { routes.insert(route) }
+                            if let times = metadata.railTimes { railTimes.insert(times) }
+                        }
+                    } else { throw ReimburError("\(source.lastPathComponent) 格式无效，请选择 PDF 或常见图片。") }
                     if let expense = updated.expenses.first(where: { $0.id == expenseID }) {
                         attachment.name = naming.filename(source: source, number: attachment.number, claim: updated, expense: expense, role: role)
                         attachment.name = AttachmentNaming.uniqueFilename(attachment.name, usedNames: &usedNames)
@@ -234,7 +358,7 @@ import UniformTypeIdentifiers
 
     /// One batch is one database write. Any copy, recognition or save failure rolls back only
     /// this batch's new files; existing expenses and attachments are left intact.
-    func importTripFiles(_ sources: [URL], into claim: Claim, kind: ExpenseKind, naming: AttachmentNaming = .saved()) throws -> Claim {
+    func importTripFiles(_ sources: [URL], into claim: Claim, kind: ExpenseKind, naming: AttachmentNaming = .saved(), persist: Bool = true) throws -> Claim {
         guard ready, claim.kind == .trip, claim.kind.categories.contains(kind), kind.acceptsInvoices else {
             throw ReimburError("请选择交通或住宿费用导入发票。")
         }
@@ -243,8 +367,11 @@ import UniformTypeIdentifiers
         var updated = claim.withPeopleAssigned.withDirectHotelTotals.withInvoiceLedger
         let originalIDs = Set(claim.attachments.map(\.id))
         var matches: [String: Set<UUID>] = [:]
+        func normalizedKey(_ value: String) -> String {
+            value.replacingOccurrences(of: #"[\s-]"#, with: "", options: .regularExpression).uppercased()
+        }
         func register(_ key: String?, prefix: String, expenseID: UUID) {
-            if let key { matches[prefix + key, default: []].insert(expenseID) }
+            if let key, !key.isEmpty { matches[prefix + normalizedKey(key), default: []].insert(expenseID) }
         }
         for expense in updated.expenses where expense.kind == kind {
             for invoice in expense.invoices { register(invoice.number, prefix: "invoice:", expenseID: expense.id) }
@@ -254,6 +381,7 @@ import UniformTypeIdentifiers
                 $0.note.isEmpty && $0.origin.isEmpty && $0.destination.isEmpty && $0.dates == nil && $0.departureTime == nil && $0.arrivalTime == nil }?.id
         }
         var importedInvoiceIDs: [UUID] = []
+        var fallbackItineraryIndex = 0
         do {
             // Process invoices first so a mixed selection works regardless of file-picker order.
             for file in files where file.role == .invoice {
@@ -271,18 +399,27 @@ import UniformTypeIdentifiers
                     register(number, prefix: "invoice:", expenseID: expenseID)
                 }
             }
+            let itineraryFallbackIDs = importedInvoiceIDs + updated.expenses
+                .filter { $0.kind == kind && !importedInvoiceIDs.contains($0.id) && !$0.invoices.isEmpty }
+                .map(\.id)
             for file in files where file.role == .itinerary {
                 var candidates = Set<UUID>()
-                if let number = file.invoiceNumber { candidates.formUnion(matches["invoice:" + number] ?? []) }
-                if let order = file.orderNumber { candidates.formUnion(matches["order:" + order] ?? []) }
+                if let number = file.invoiceNumber { candidates.formUnion(matches["invoice:" + normalizedKey(number)] ?? []) }
+                if let order = file.orderNumber { candidates.formUnion(matches["order:" + normalizedKey(order)] ?? []) }
                 let expenseID: UUID
                 func hasFreeSlot(_ id: UUID) -> Bool {
                     guard let expense = updated.expenses.first(where: { $0.id == id }) else { return false }
                     return (expense.itineraries ?? []).count < max(1, expense.invoices.count)
                 }
-                if candidates.count == 1, let matched = candidates.first, hasFreeSlot(matched) { expenseID = matched }
+                let availableCandidates = candidates.filter(hasFreeSlot)
+                if availableCandidates.count == 1, let matched = availableCandidates.first { expenseID = matched }
                 else if candidates.isEmpty, file.invoiceNumber == nil, file.orderNumber == nil, importedInvoiceIDs.count == 1, hasFreeSlot(importedInvoiceIDs[0]) {
                     expenseID = importedInvoiceIDs[0]
+                } else if let ordered = itineraryFallbackIDs.dropFirst(fallbackItineraryIndex).first(where: hasFreeSlot) {
+                    // Some taxi itinerary PDFs contain no stable invoice/order number.
+                    // Pair those files with imported invoices in the selection order.
+                    expenseID = ordered
+                    fallbackItineraryIndex = (itineraryFallbackIDs.firstIndex(of: ordered) ?? fallbackItineraryIndex) + 1
                 } else {
                     if let empty = emptyRow() { expenseID = empty }
                     else { updated.addExpense(kind, unitPrice: 0); expenseID = updated.expenses.last!.id }
@@ -290,7 +427,7 @@ import UniformTypeIdentifiers
                 }
                 updated = try importFiles([file.source], into: updated, expenseID: expenseID, role: .itinerary, naming: naming, persist: false)
             }
-            guard save(updated) else { throw ReimburError(errorMessage ?? "保存导入清单失败。") }
+            guard !persist || save(updated) else { throw ReimburError(errorMessage ?? "保存导入清单失败。") }
             return updated
         } catch {
             for attachment in updated.attachments where !originalIDs.contains(attachment.id) { discardFile(attachment) }
@@ -307,6 +444,121 @@ import UniformTypeIdentifiers
         guard panel.runModal() == .OK else { return nil }
         do { return try importTripFiles(panel.urls, into: claim, kind: kind) }
         catch { errorMessage = error.localizedDescription; return nil }
+    }
+
+    /// Imports a mixed batch from the record toolbar. Invoice PDFs are classified locally,
+    /// grouped by expense type, and each group creates the corresponding detail rows.
+    func chooseAllInvoices(for claim: Claim) -> Claim? {
+        var workingClaim = claim
+        let controller = ClaimantImportPanelController(names: workingClaim.travelerNames ?? [], kind: claim.kind)
+        controller.onUpload = { [weak self, weak controller] claimant in
+            guard let self, let controller else { return }
+            let panel = NSOpenPanel()
+            panel.title = "导入发票"
+            panel.allowedContentTypes = [.pdf, .png, .jpeg, .heic, .tiff, .bmp, .gif]
+            panel.allowsMultipleSelection = true
+            panel.canChooseDirectories = false
+            guard panel.runModal() == .OK, !panel.urls.isEmpty else { return }
+
+            var importClaim = workingClaim
+            var names = importClaim.travelerNames ?? []
+            if !names.contains(claimant) {
+                names.append(claimant)
+                importClaim.setTravelerNames(names)
+            }
+            let originalIDs = Set(importClaim.attachments.map(\.id))
+            controller.beginProgress()
+            do {
+                let updated = try self.importAllInvoices(panel.urls, into: importClaim, fallbackKind: nil,
+                                                         claimant: claimant, progress: { value in
+                    controller.updateProgress(value)
+                })
+                workingClaim = updated
+                controller.setNames(updated.travelerNames ?? [])
+                let count = updated.attachments.filter { !originalIDs.contains($0.id) }.count
+                controller.completeProgress(message: "成功导入 \(count) 份发票")
+            } catch {
+                controller.failProgress(message: error.localizedDescription)
+            }
+        }
+        controller.onCancel = {
+            NSApp.stopModal(withCode: .cancel)
+        }
+        // Dim the current app window with an in-window view. Using a separate
+        // child NSWindow here can race AppKit's modal-window teardown on macOS.
+        let owner = NSApp.keyWindow ?? NSApp.mainWindow ?? NSApp.windows.first(where: { $0.isVisible && $0 != controller.panel })
+        let maskView = NSView(frame: owner?.contentView?.bounds ?? .zero)
+        maskView.autoresizingMask = [.width, .height]
+        maskView.wantsLayer = true
+        maskView.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.24).cgColor
+        if let contentView = owner?.contentView {
+            contentView.addSubview(maskView, positioned: .above, relativeTo: nil)
+        }
+        controller.panel.orderFront(nil)
+        NSApp.runModal(for: controller.panel)
+        maskView.removeFromSuperview()
+        controller.panel.orderOut(nil)
+        return workingClaim == claim ? nil : workingClaim
+    }
+
+    func importAllInvoices(_ sources: [URL], into claim: Claim, fallbackKind: ExpenseKind? = nil, claimant: String? = nil, progress: ((Double) -> Void)? = nil) throws -> Claim {
+        guard ready else { throw ReimburError("数据库不可用，无法导入发票。") }
+        guard !sources.isEmpty else { return claim }
+        var updated = claim.withPeopleAssigned.withDirectHotelTotals.withInvoiceLedger.withAllowanceTotal
+        let originalIDs = Set(claim.attachments.map(\.id))
+        do {
+            if claim.kind != .trip {
+                let expenseID: UUID
+                if let existing = updated.expenses.first(where: { $0.kind == updated.kind.categories[0] }) {
+                    expenseID = existing.id
+                } else {
+                    updated.addExpense(updated.kind.categories[0], unitPrice: 0)
+                    expenseID = updated.expenses.last!.id
+                }
+                progress?(0.35)
+                updated = try importFiles(sources, into: updated, expenseID: expenseID, persist: false)
+                progress?(0.85)
+                if let claimant, let index = updated.expenses.firstIndex(where: { $0.id == expenseID }) {
+                    updated.expenses[index].claimant = claimant
+                    if var entries = updated.invoiceLedgerEntries {
+                        for index in entries.indices where entries[index].expenseID == expenseID { entries[index].claimant = claimant }
+                        updated.invoiceLedgerEntries = entries
+                    }
+                }
+            } else {
+                var groups: [ExpenseKind: [URL]] = [:]
+                for (index, source) in sources.enumerated() {
+                    let inspection = try TripImportRecognition.inspect(source)
+                    guard let kind = inspection.suggestedKind ?? fallbackKind, kind.acceptsInvoices, claim.kind.categories.contains(kind) else {
+                        throw ReimburError("无法识别\(source.lastPathComponent)的费用类型，请在对应费用行上传。")
+                    }
+                    groups[kind, default: []].append(source)
+                    progress?(0.12 + 0.18 * Double(index + 1) / Double(max(1, sources.count)))
+                }
+                for kind in [ExpenseKind.train, .flight, .taxi, .hotel] where !groups[kind, default: []].isEmpty {
+                    progress?(0.35)
+                    updated = try importTripFiles(groups[kind] ?? [], into: updated, kind: kind, persist: false)
+                    if let claimant {
+                        let importedIDs = Set(updated.expenses.filter { $0.kind == kind }.flatMap(\.attachments).map(\.id)).subtracting(originalIDs)
+                        for index in updated.expenses.indices where updated.expenses[index].kind == kind && !Set(updated.expenses[index].attachments.map(\.id)).intersection(importedIDs).isEmpty {
+                            updated.expenses[index].claimant = claimant
+                        }
+                        if var entries = updated.invoiceLedgerEntries {
+                            let expenseIDs = Set(updated.expenses.filter { $0.kind == kind && !Set($0.attachments.map(\.id)).intersection(importedIDs).isEmpty }.map(\.id))
+                            for index in entries.indices where expenseIDs.contains(entries[index].expenseID) { entries[index].claimant = claimant }
+                            updated.invoiceLedgerEntries = entries
+                        }
+                    }
+                    progress?(0.35 + 0.55 * Double(updated.expenses.filter { $0.kind == kind }.flatMap(\.attachments).count) / Double(max(1, sources.count)))
+                }
+            }
+            guard save(updated) else { throw ReimburError(errorMessage ?? "保存导入清单失败。") }
+            progress?(1)
+            return updated
+        } catch {
+            for attachment in updated.attachments where !originalIDs.contains(attachment.id) { discardFile(attachment) }
+            throw error
+        }
     }
 
     func moveItinerary(_ attachment: Attachment, in claim: Claim, from sourceID: UUID, to destinationID: UUID) -> Claim? {

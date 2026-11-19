@@ -1,6 +1,17 @@
 import SwiftUI
 import AppKit
 
+private enum ExpenseBatchAction: Identifiable {
+    case claimant(String, Int)
+    case delete([UUID])
+    var id: String {
+        switch self {
+        case let .claimant(name, count): return "claimant-\(name)-\(count)"
+        case let .delete(ids): return "delete-\(ids.map(\.uuidString).joined(separator: ","))"
+        }
+    }
+}
+
 struct ClaimEditor: View {
     @EnvironmentObject private var store: ClaimStore
     @State private var draft: Claim
@@ -8,6 +19,9 @@ struct ClaimEditor: View {
     @State private var saved = true
     @State private var deletingExpense: UUID?
     @State private var deletingCover: Attachment?
+    @State private var expenseBatchMode = false
+    @State private var selectedExpenseRows: Set<UUID> = []
+    @State private var expenseBatchAction: ExpenseBatchAction?
     private let source: Claim
 
     init(claim: Claim) {
@@ -18,7 +32,7 @@ struct ClaimEditor: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            ScrollView {
+            ScrollView(.vertical, showsIndicators: true) {
                 VStack(alignment: .leading, spacing: 22) {
                     metrics
                     if draft.kind == .allowance {
@@ -33,16 +47,18 @@ struct ClaimEditor: View {
                         }
                     }
                     if draft.kind == .trip {
-                        peopleSection
-                        tripLedgerSection
                         coverSection
+                        tripLedgerSection
+                        peopleSection
                         expenseSection
                     } else {
-                        InvoiceLedgerView(claim: $draft, export: { store.exportLedger(draft) }, files: fileActions, importInvoices: importLedgerInvoices)
+                        coverSection
+                        InvoiceLedgerView(claim: $draft, export: { store.exportLedger(draft) }, files: fileActions,
+                                          renameAttachments: renameBatchAttachments)
                     }
                     HStack {
                         Image(systemName: "lock.shield").foregroundStyle(Palette.accent)
-                        Text("修改自动保存至本机 · 发票金额自动识别，可手动修改 · 发票数量按 PDF 文件计")
+                        Text("修改自动保存至本机 · 发票金额自动识别，可手动修改 · 发票数量按文件计")
                     }.font(.system(size: 10)).foregroundStyle(Palette.muted)
                 }.padding(26)
             }
@@ -61,6 +77,26 @@ struct ClaimEditor: View {
             }
             Button("取消", role: .cancel) { deletingCover = nil }
         }
+        .confirmationDialog("确认批量操作", isPresented: Binding(get: { expenseBatchAction != nil }, set: { if !$0 { expenseBatchAction = nil } }), titleVisibility: .visible, presenting: expenseBatchAction) { action in
+            switch action {
+            case let .claimant(name, count):
+                Button("确认变更 \(count) 笔为“\(name)”") {
+                    batchSetExpenseClaimant(name)
+                    expenseBatchAction = nil
+                }
+            case let .delete(ids):
+                Button("确认删除 \(ids.count) 笔费用", role: .destructive) {
+                    batchDeleteExpenseRows(ids)
+                    expenseBatchAction = nil
+                }
+            }
+            Button("取消", role: .cancel) { expenseBatchAction = nil }
+        } message: { action in
+            switch action {
+            case let .claimant(_, count): Text("将变更所选的 \(count) 笔费用及其附件归属。")
+            case let .delete(ids): Text("将删除所选的 \(ids.count) 笔费用及其发票、行程单。")
+            }
+        }
     }
 
     private var header: some View {
@@ -78,11 +114,14 @@ struct ClaimEditor: View {
             Spacer(minLength: 12)
             if saved { Label("已自动保存", systemImage: "checkmark.circle.fill").font(.system(size: 10)).foregroundStyle(Palette.muted) }
             else { Button("重试保存") { saved = store.save(draft) }.foregroundStyle(.red) }
+            Button { importAllInvoices() } label: { Label("导入发票", systemImage: "tray.and.arrow.down").padding(.vertical, 4) }
+                .buttonStyle(ExportButtonStyle(color: .orange))
+                .disabled(!saved || store.exporting)
             Button { store.exportInvoices(draft) } label: { Label("导出发票", systemImage: "folder").padding(.vertical, 4) }
                 .buttonStyle(ExportButtonStyle(color: .purple))
-                .disabled(!saved || store.exporting || draft.expenses.flatMap(\.attachments).isEmpty)
+                .disabled(!saved || store.exporting || draft.invoiceCount == 0)
             Button { store.export([draft]) } label: { Label("打印发票", systemImage: "printer").padding(.vertical, 4) }
-                .buttonStyle(ExportButtonStyle(color: Palette.accent)).disabled(!saved || store.exporting)
+                .buttonStyle(ExportButtonStyle(color: Palette.accent)).disabled(!saved || store.exporting || draft.invoiceCount == 0)
         }.padding(.horizontal, 26).padding(.top, 42).padding(.bottom, 23)
     }
 
@@ -92,9 +131,15 @@ struct ClaimEditor: View {
     private var basicInfo: some View {
         Card(fillHeight: true, spacing: draft.kind == .meal ? 10 : 16) {
             SectionLabel(title: "基本信息", subtitle: draft.kind == .allowance ? "报销人与用途" : "日期、报销人与费用自动关联")
-            LabeledField(title: "\(draft.kind == .trip ? "出差人" : "报销人") · \(draft.travelerCount) 人") {
-                PeopleTagInput(names: Binding(get: { draft.travelerNames ?? [] }, set: { draft.setTravelerNames($0) }),
-                               rename: { draft.renameTraveler(from: $0, to: $1) })
+            LabeledField(title: "报销人 · \(draft.travelerCount) 人") {
+                VStack(alignment: .leading, spacing: 4) {
+                    PeopleTagInput(names: Binding(get: { draft.travelerNames ?? [] }, set: { draft.setTravelerNames($0) }),
+                                   rename: { draft.renameTraveler(from: $0, to: $1) })
+                    if draft.kind == .trip {
+                        Text("首位报销人将作为主报销人")
+                            .font(.system(size: 10)).foregroundStyle(Palette.muted)
+                    }
+                }
             }
             HStack(alignment: .top, spacing: 16) {
                 LabeledField(title: "部门") {
@@ -113,8 +158,8 @@ struct ClaimEditor: View {
             if draft.kind == .allowance {
                 HStack(spacing: 12) {
                     Text("报销总额（元）").font(.system(size: 11, weight: .medium)).foregroundStyle(Palette.muted)
-                    AmountField(cents: Binding(get: { draft.total }, set: { draft.allowanceAmount = $0 }))
-                        .frame(width: 160).accessibilityLabel("补贴报销总额")
+                        AmountField(cents: Binding(get: { draft.total }, set: { draft.allowanceAmount = $0 }))
+                        .frame(width: 160).accessibilityLabel("其他报销总额")
                     Text("单独填写，与清单金额独立").font(.system(size: 11)).foregroundStyle(Palette.muted)
                     Spacer(minLength: 0)
                 }
@@ -141,18 +186,14 @@ struct ClaimEditor: View {
                 HStack(spacing: 12) {
                     Text("用途").font(.system(size: 11, weight: .medium)).foregroundStyle(Palette.muted)
                     if draft.kind == .meal {
-                        TextField("用途", text: .constant("餐补报销")).disabled(true)
-                            .textFieldStyle(.plain).font(.system(size: 12)).foregroundStyle(Palette.muted)
-                            .padding(.horizontal, 8).frame(height: 28)
-                            .background(Palette.ink.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
-                            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Palette.ink.opacity(0.08)))
+                        TextField("填写计日用途", text: Binding(get: { draft.reimbursementPurpose ?? "" }, set: { draft.reimbursementPurpose = $0 }))
                     } else {
                         TextField("填写用途，应用至清单每一行", text: Binding(get: { draft.reimbursementPurpose ?? "" }, set: { draft.reimbursementPurpose = $0 }))
                     }
                 }
             }
             LabeledField(title: draft.kind == .trip ? "备注" : "备注 / 报销事由") {
-                TextEditor(text: $draft.note).font(.system(size: 12)).scrollContentBackground(.hidden)
+                TextEditor(text: $draft.note).font(.system(size: 12)).scrollContentBackground(.hidden).scrollIndicators(.automatic)
                     .padding(7).frame(minHeight: draft.kind == .meal ? 64 : 72, idealHeight: draft.kind == .meal ? 64 : 72, maxHeight: .infinity)
                     .background(.white, in: RoundedRectangle(cornerRadius: 7))
                     .overlay(RoundedRectangle(cornerRadius: 7).stroke(Palette.ink.opacity(0.10)))
@@ -174,7 +215,7 @@ struct ClaimEditor: View {
                 Spacer()
                 Button("查看完整清单") { store.previewSummary(draft) }
             }
-            ScrollView(.horizontal, showsIndicators: false) {
+            ScrollView(.horizontal, showsIndicators: true) {
                 HStack(spacing: 10) {
                     ForEach(draft.personBreakdowns) { person in
                         Button { store.previewSummary(draft, personID: person.id) } label: {
@@ -223,6 +264,23 @@ struct ClaimEditor: View {
                                 .font(.system(size: 11)).foregroundStyle(Palette.muted)
                         }
                         Spacer()
+                        if draft.kind == .trip {
+                            if expenseBatchMode {
+                                Menu("变更报销人 \(selectedExpenseRows.count)") {
+                                    ForEach(draft.travelerNames ?? [], id: \.self) { name in
+                                        Button(name) { expenseBatchAction = .claimant(name, selectedExpenseRows.count) }
+                                    }
+                                }.buttonStyle(ExportButtonStyle(color: Palette.accent))
+                                    .disabled(selectedExpenseRows.isEmpty || (draft.travelerNames ?? []).isEmpty)
+                                Button("批量删除 \(selectedExpenseRows.count)", role: .destructive) { expenseBatchAction = .delete(Array(selectedExpenseRows)) }
+                                    .buttonStyle(ExportButtonStyle(color: .red)).disabled(selectedExpenseRows.isEmpty)
+                                Button("完成") { expenseBatchMode = false }
+                                    .buttonStyle(ExportButtonStyle(color: Palette.muted))
+                            } else {
+                                Button("批量操作") { expenseBatchMode = true }
+                                    .buttonStyle(ExportButtonStyle(color: Palette.accent))
+                            }
+                        }
                         Button { addExpense(group.kind) } label: {
                             Label("再加一笔", systemImage: "plus")
                         }
@@ -230,14 +288,12 @@ struct ClaimEditor: View {
                     Card(spacing: 12) {
                         if group.kind.acceptsInvoices {
                             HStack {
-                                Text("点击文件图标预览，点击名称改名").font(.system(size: 10)).foregroundStyle(Palette.muted)
+                                Text("点击文件图标预览，点击名称改名；批量导入请使用右上角“导入发票”").font(.system(size: 10)).foregroundStyle(Palette.muted)
                                 Spacer()
-                                Button { batchImport(group.kind) } label: {
-                                    Label("导入", systemImage: "tray.and.arrow.down")
-                                }.buttonStyle(ExportButtonStyle(color: Palette.accent))
                             }
                         }
-                        TripExpenseListView(claim: $draft, kind: group.kind, remove: { deletingExpense = $0 }, files: fileActions)
+                        TripExpenseListView(claim: $draft, kind: group.kind, remove: { deletingExpense = $0 }, files: fileActions,
+                                            batchMode: $expenseBatchMode, selectedExpenses: $selectedExpenseRows)
                     }
 
                 }
@@ -249,15 +305,15 @@ struct ClaimEditor: View {
         InvoiceLedgerView(claim: $draft,
                           export: { store.exportLedger(draft) },
                           files: fileActions,
-                          showsImport: false)
+                          renameAttachments: renameBatchAttachments)
     }
 
     private var coverSection: some View {
         Card {
             HStack {
-                SectionLabel(title: "报销单", subtitle: "上传签字或审批后的报销单，打印时排在本记录发票上方")
+                SectionLabel(title: "报销单", subtitle: draft.kind == .trip ? "出差报销单按所有出差人合并预览" : "填写年月日、用途、大写金额、制单及领款人")
                 Spacer()
-                Button { store.previewTripForm(draft) } label: { Label("预览报销单", systemImage: "doc.text.magnifyingglass") }
+                Button { draft.kind == .trip ? store.previewTripForm(draft) : store.previewReimbursementForm(draft) } label: { Label("预览报销单", systemImage: "doc.text.magnifyingglass") }
                     .accessibilityLabel("预览报销单")
                 Button { upload(expenseID: nil) } label: { Label("上传图片", systemImage: "photo.badge.plus") }
             }
@@ -303,20 +359,66 @@ struct ClaimEditor: View {
         })
     }
 
-    private func batchImport(_ kind: ExpenseKind) {
-        if let updated = store.chooseTripFiles(for: draft, kind: kind) { draft = updated; selectedKind = kind }
+    private func importAllInvoices() {
+        Task { @MainActor in
+            await Task.yield()
+            if let updated = store.chooseAllInvoices(for: draft) {
+                draft = updated
+                selectedKind = draft.expenseGroups.first(where: { $0.kind.acceptsInvoices })?.kind ?? selectedKind
+            }
+        }
+    }
+    private func renameBatchAttachments(_ expenseIDs: Set<UUID>, _ claimant: String) {
+        var renamed = Set<UUID>()
+        for expense in draft.expenses where expenseIDs.contains(expense.id) {
+            for attachment in expense.attachments where renamed.insert(attachment.id).inserted {
+                let role: ExpenseAttachmentRole = expense.invoices.contains(where: { $0.id == attachment.id }) ? .invoice : .itinerary
+                let source = URL(fileURLWithPath: attachment.name)
+                let generated = AttachmentNaming.saved().filename(source: source, number: attachment.number,
+                                                                  claim: draft, expense: expense, role: role,
+                                                                  claimantOverride: claimant)
+                let stem = source.deletingPathExtension().lastPathComponent
+                let generatedStem = URL(fileURLWithPath: generated).deletingPathExtension().lastPathComponent
+                guard generatedStem != stem else { continue }
+                do {
+                    draft = try store.renameAttachment(attachment, to: generatedStem, in: draft, expenseID: expense.id)
+                } catch { store.errorMessage = error.localizedDescription }
+            }
+        }
+    }
+    private func batchSetExpenseClaimant(_ name: String) {
+        guard !selectedExpenseRows.isEmpty else { return }
+        for index in draft.expenses.indices {
+            guard selectedExpenseRows.contains(draft.expenses[index].id) else { continue }
+            draft.expenses[index].claimant = name
+            if var entries = draft.invoiceLedgerEntries {
+                for entryIndex in entries.indices where entries[entryIndex].expenseID == draft.expenses[index].id {
+                    entries[entryIndex].claimant = name
+                }
+                draft.invoiceLedgerEntries = entries
+            }
+        }
+        renameBatchAttachments(selectedExpenseRows, name)
+        selectedExpenseRows.removeAll()
+    }
+    private func batchDeleteExpenseRows(_ ids: [UUID]) {
+        selectedExpenseRows.removeAll()
+        for id in ids { removeExpenseImmediately(id) }
     }
     private func addExpense(_ kind: ExpenseKind) {
         draft.addExpense(kind, unitPrice: ExpenseDefaults.saved().price(for: kind))
         selectedKind = kind
     }
-    private func importLedgerInvoices() {
-        if draft.expenses.isEmpty { draft.addExpense(draft.kind.categories[0], unitPrice: 0) }
-        guard let expenseID = draft.expenses.first?.id else { return }
-        upload(expenseID: expenseID)
-    }
     private func upload(expenseID: UUID?, role: ExpenseAttachmentRole = .invoice) {
-        if let updated = store.chooseFiles(for: draft, expenseID: expenseID, role: role) { draft = updated }
+        let originalAttachmentIDs = Set(draft.attachments.map(\.id))
+        Task { @MainActor in
+            await Task.yield()
+            if let updated = store.chooseFiles(for: draft, expenseID: expenseID, role: role) { draft = updated }
+            let imported = draft.attachments.filter { !originalAttachmentIDs.contains($0.id) }.count
+            if imported > 0 {
+                store.importSuccess = role == .itinerary ? "已上传 \(imported) 份行程单" : "已导入 \(imported) 份发票"
+            }
+        }
     }
     private func open(_ attachment: Attachment) {
         store.previewAttachment(attachment, in: draft)
@@ -329,6 +431,10 @@ struct ClaimEditor: View {
         if let updated = store.removeAttachment(attachment, from: draft, expenseID: expenseID) { draft = updated }
     }
     private func removeExpense(_ id: UUID) {
+        removeExpenseImmediately(id)
+        deletingExpense = nil
+    }
+    private func removeExpenseImmediately(_ id: UUID) {
         guard let expense = draft.expenses.first(where: { $0.id == id }) else { return }
         var updated = draft
         updated.expenses.removeAll { $0.id == id }
@@ -337,7 +443,6 @@ struct ClaimEditor: View {
             if !draft.expenses.contains(where: { $0.kind == selectedKind }) { selectedKind = draft.expenseGroups.first?.kind }
             for attachment in expense.attachments { store.discardFile(attachment) }
         }
-        deletingExpense = nil
     }
 }
 

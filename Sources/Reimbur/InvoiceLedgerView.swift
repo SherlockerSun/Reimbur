@@ -1,5 +1,16 @@
 import SwiftUI
 
+private enum LedgerBatchAction: Identifiable {
+    case claimant(String, Int)
+    case delete([UUID])
+    var id: String {
+        switch self {
+        case let .claimant(name, count): return "claimant-\(name)-\(count)"
+        case let .delete(ids): return "delete-\(ids.map(\.uuidString).joined(separator: ","))"
+        }
+    }
+}
+
 enum InvoiceLedgerColumns {
     static let columns: [ReimbursementColumn] = [
         ReimbursementColumn(id: "sequence", title: "序号", width: 48, minimum: 44, alignment: .center),
@@ -21,9 +32,12 @@ struct InvoiceLedgerView: View {
     @Binding var claim: Claim
     var export: () -> Void
     var files = ExpenseFileActions()
-    var importInvoices: () -> Void = {}
-    var showsImport = true
+    var renameAttachments: (Set<UUID>, String) -> Void = { _, _ in }
     @State private var tripRowsInTypeOrder = true
+    @State private var selectedRows: Set<UUID> = []
+    @State private var batchMode = false
+    @State private var batchAction: LedgerBatchAction?
+    private var claimantNames: [String] { claim.travelerNames ?? [] }
 
     var body: some View {
         Card {
@@ -32,21 +46,31 @@ struct InvoiceLedgerView: View {
                     .contextMenu { Button("导出报销清单（XLSX）", action: export) }
                     .help("右键清单标题可导出 XLSX")
                 Spacer(minLength: 12)
+                if batchMode {
+                    Menu("变更报销人 \(selectedRows.count)") {
+                        ForEach(claimantNames, id: \.self) { name in
+                            Button(name) { batchAction = .claimant(name, selectedRows.count) }
+                        }
+                    }.buttonStyle(ExportButtonStyle(color: Palette.accent)).disabled(selectedRows.isEmpty || claimantNames.isEmpty)
+                    Button("批量删除 \(selectedRows.count)", role: .destructive) { batchAction = .delete(Array(selectedRows)) }
+                        .buttonStyle(ExportButtonStyle(color: .red)).disabled(selectedRows.isEmpty)
+                    Button("完成") { batchMode = false }
+                        .buttonStyle(ExportButtonStyle(color: Palette.muted))
+                } else {
+                    Button("批量操作") { batchMode = true }
+                        .buttonStyle(ExportButtonStyle(color: Palette.accent))
+                }
                 Button(action: export) {
                     Label("导出", systemImage: "arrow.down.doc")
                 }.buttonStyle(ExportButtonStyle(color: Palette.accent))
                     .help("导出报销清单（Excel）")
                     .accessibilityLabel("导出报销清单 Excel")
-                if showsImport {
-                    Button(action: importInvoices) { Label("导入", systemImage: "tray.and.arrow.down") }
-                        .buttonStyle(ExportButtonStyle(color: Palette.accent))
-                }
 
             }
             if rows.isEmpty {
                 VStack(spacing: 10) {
                     Image(systemName: "tablecells").font(.system(size: 28, weight: .light)).foregroundStyle(Palette.accent)
-                    Text("暂无发票，点击右上角“导入”添加").font(.system(size: 12)).foregroundStyle(Palette.muted)
+                    Text("暂无发票，点击右上角“导入发票”添加").font(.system(size: 12)).foregroundStyle(Palette.muted)
                 }.frame(maxWidth: .infinity).padding(.vertical, 30)
                     .background(Palette.canvas, in: RoundedRectangle(cornerRadius: 9))
             } else {
@@ -54,8 +78,11 @@ struct InvoiceLedgerView: View {
                                    rowHeight: { _ in 60 }, sort: {
                                        if claim.kind == .trip { tripRowsInTypeOrder = $1 == nil }
                                        claim.sortLedgerRows(column: $0, ascending: $1)
-                                   }) { row, index, column in
-                    InvoiceLedgerCell(claim: $claim, row: row, number: index + 1, column: column, files: files)
+                                   }, selectable: batchMode, selectedIDs: $selectedRows) { row, index, column in
+                    InvoiceLedgerCell(claim: $claim, row: row, number: index + 1, column: column, files: files,
+                                      batchMode: batchMode, selected: selectedRows.contains(row.id), toggleSelection: { value in
+                                          if value { selectedRows.insert(row.id) } else { selectedRows.remove(row.id) }
+                                      })
                 }
             }
             ViewThatFits(in: .horizontal) {
@@ -71,6 +98,53 @@ struct InvoiceLedgerView: View {
                 .font(.system(size: 10)).foregroundStyle(Palette.muted)
         }
         .onChange(of: claim.id) { _, _ in tripRowsInTypeOrder = true }
+        .onChange(of: rows.map(\.id)) { _, ids in selectedRows = selectedRows.intersection(Set(ids)) }
+        .onChange(of: batchMode) { _, enabled in if !enabled { selectedRows.removeAll() } }
+        .confirmationDialog("确认批量操作", isPresented: Binding(get: { batchAction != nil }, set: { if !$0 { batchAction = nil } }), titleVisibility: .visible, presenting: batchAction) { action in
+            switch action {
+            case let .claimant(name, count):
+                Button("确认变更 \(count) 行为“\(name)”") {
+                    setClaimant(name)
+                    batchAction = nil
+                }
+            case let .delete(ids):
+                Button("确认删除 \(ids.count) 行", role: .destructive) {
+                    deleteSelected()
+                    batchAction = nil
+                }
+            }
+            Button("取消", role: .cancel) { batchAction = nil }
+        } message: { action in
+            switch action {
+            case let .claimant(_, count): Text("将变更所选的 \(count) 行及对应费用归属。")
+            case let .delete(ids): Text("将删除所选的 \(ids.count) 行发票明细。")
+            }
+        }
+    }
+    private func setClaimant(_ name: String) {
+        guard !selectedRows.isEmpty else { return }
+        if var entries = claim.invoiceLedgerEntries {
+            for index in entries.indices where selectedRows.contains(entries[index].id) {
+                entries[index].claimant = name
+            }
+            // Keep personal detail totals aligned when every invoice of an expense
+            // was selected; mixed attribution remains per-invoice in the ledger.
+            for expenseIndex in claim.expenses.indices {
+                let expenseRows = entries.filter { $0.expenseID == claim.expenses[expenseIndex].id }
+                if !expenseRows.isEmpty && expenseRows.allSatisfy({ selectedRows.contains($0.id) }) {
+                    claim.expenses[expenseIndex].claimant = name
+                }
+            }
+            claim.invoiceLedgerEntries = entries
+            let expenseIDs = Set(entries.filter { selectedRows.contains($0.id) }.map(\.expenseID))
+            self.renameAttachments(expenseIDs, name)
+        }
+        selectedRows.removeAll()
+    }
+    private func deleteSelected() {
+        let ids = selectedRows
+        selectedRows.removeAll()
+        for id in ids { files.removeLedgerRow(id) }
     }
     private var rows: [InvoiceLedgerRow] {
         claim.kind == .trip && tripRowsInTypeOrder ? claim.invoiceLedgerRowsInTypeOrder : claim.invoiceLedgerRows
@@ -123,6 +197,9 @@ private struct InvoiceLedgerCell: View {
     var number: Int
     var column: ReimbursementColumn
     var files: ExpenseFileActions
+    var batchMode: Bool
+    var selected: Bool
+    var toggleSelection: (Bool) -> Void
     private var names: [String] {
         var names = claim.travelerNames ?? []
         if let name = row.entry.claimant, !names.contains(name) { names.append(name) }
@@ -147,6 +224,16 @@ private struct InvoiceLedgerCell: View {
     var body: some View {
         Group {
             switch column.id {
+            case "select":
+                Toggle("选择第\(number)行", isOn: Binding(get: { selected }, set: toggleSelection))
+                    .toggleStyle(.checkbox).labelsHidden().accessibilityLabel("选择第\(number)行")
+            case "sequence":
+                if batchMode {
+                    Toggle("选择第\(number)行", isOn: Binding(get: { selected }, set: toggleSelection))
+                        .toggleStyle(.checkbox).labelsHidden().accessibilityLabel("选择第\(number)行")
+                } else {
+                    Text("\(number)").monospacedDigit().foregroundStyle(Palette.muted).font(.system(size: 11))
+                }
             case "date": LedgerDateField(value: entryBinding(\.date)).help(entryBinding(\.date).wrappedValue)
             case "person": TablePersonField(selection: entryBinding(\.claimant), names: names)
             case "number":

@@ -36,18 +36,22 @@ struct WorkspaceView: View {
     @State private var didAppear = false
     @State private var home = true
     @State private var filter: ClaimKind?
-    @State private var statusFilter: ClaimStatus?
+    @State private var expandedStatuses: Set<ClaimStatus> = [.unreimbursed]
     @State private var selectedID: UUID?
     @State private var search = ""
     @State private var period = ClaimPeriodFilter()
+    @State private var claimantFilter = ""
     @State private var batch = false
     @State private var checked = Set<UUID>()
     @State private var deleting = Set<UUID>()
     @State private var renaming: UUID?
     @State private var newTitle = ""
     private var filtered: [Claim] {
-        store.claims.filter(ClaimRecordFilter(kind: filter, status: statusFilter, period: period, search: search).matches)
+        store.claims.filter(ClaimRecordFilter(kind: filter, status: nil, period: period, search: search, claimant: claimantFilter).matches)
             .sorted { $0.createdAt > $1.createdAt }
+    }
+    private var claimantNames: [String] {
+        Array(Set(store.claims.flatMap { ($0.travelerNames ?? []) + $0.expenses.compactMap(\.claimant) })).sorted { $0.localizedStandardCompare($1) == .orderedAscending }
     }
     var body: some View {
         HStack(spacing: 0) {
@@ -72,9 +76,12 @@ struct WorkspaceView: View {
         .animation(.easeInOut(duration: 0.32), value: recordsCollapsed)
         .animation(.easeInOut(duration: 0.26), value: menuCollapsed)
         .background(Palette.canvas).foregroundStyle(Palette.ink).textFieldStyle(.roundedBorder)
-        .overlay(alignment: .topTrailing) {
+        .overlay(alignment: .topLeading) {
             if !home && !store.showSettings {
-                recordToggle.padding(.trailing, 14).padding(.top, 5)
+                recordToggle
+                    .padding(.leading, (menuCollapsed ? 76 : 210) + (recordsCollapsed ? 0 : 321))
+                    .padding(.top, 5)
+                    .animation(.easeInOut(duration: 0.32), value: recordsCollapsed)
             }
         }
         .alert("操作未完成", isPresented: Binding(get: { store.errorMessage != nil }, set: { if !$0 { store.errorMessage = nil } })) {
@@ -84,6 +91,9 @@ struct WorkspaceView: View {
             Button("在 Finder 中显示") { if let url = store.exportSuccess { NSWorkspace.shared.activateFileViewerSelecting([url]) }; store.exportSuccess = nil }
             Button("完成", role: .cancel) { store.exportSuccess = nil }
         } message: { Text(store.exportSuccess?.pathExtension == "zip" ? "当前记录的全部发票和行程单已打包，保留原始文件。" : store.exportSuccess?.pathExtension == "xlsx" ? "清单已保存为 Excel 文件，包含日期、姓名、发票号码、金额、报销单金额、明细及用途。" : "仅包含附件，每页上下各一张；行程单已裁切底部空白，火车票每张打印两份。") }
+        .alert("导入完成", isPresented: Binding(get: { store.importSuccess != nil }, set: { if !$0 { store.importSuccess = nil } })) {
+            Button("完成", role: .cancel) { store.importSuccess = nil }
+        } message: { Text(store.importSuccess ?? "") }
         .alert("重命名报销记录", isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
             TextField("报销名称", text: $newTitle)
             Button("保存") { if let id = renaming { store.rename(id, to: newTitle) }; renaming = nil }
@@ -102,7 +112,10 @@ struct WorkspaceView: View {
             if store.exporting {
                 ZStack {
                     Color.black.opacity(0.25)
-                    VStack(spacing: 18) { ProgressView(); Text("正在整理附件并导出…") }
+                    VStack(spacing: 18) {
+                        ProgressView()
+                        Text("正在整理附件并导出…")
+                    }
                         .padding(35).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18))
                 }
             }
@@ -116,7 +129,7 @@ struct WorkspaceView: View {
         }
         .onChange(of: store.claims.map(\.id)) { old, new in
             if let added = new.first(where: { !old.contains($0) }) {
-                store.showSettings = false; home = false; selectedID = added; period = ClaimPeriodFilter(); search = ""; statusFilter = nil
+                store.showSettings = false; home = false; selectedID = added; period = ClaimPeriodFilter(); search = ""; claimantFilter = ""
                 if let kind = store.claims.first(where: { $0.id == added })?.kind, filter != nil && filter != kind { filter = kind }
             } else if !new.contains(selectedID ?? UUID()) { selectedID = filtered.first?.id }
             checked.formIntersection(new)
@@ -163,14 +176,15 @@ struct WorkspaceView: View {
             .buttonStyle(.plain).foregroundStyle(Palette.muted)
             .help(recordsCollapsed ? "展开报销记录列表" : "收起报销记录列表")
             .accessibilityLabel(recordsCollapsed ? "展开报销记录列表" : "收起报销记录列表")
+            .animation(.easeInOut(duration: 0.32), value: recordsCollapsed)
     }
     private var recordPanel: some View {
         HStack(spacing: 0) {
             recordList
             Divider().opacity(0.5)
         }
-        .frame(width: 281)
-        .frame(width: recordsCollapsed ? 0 : 281, alignment: .trailing)
+        .frame(width: 321)
+        .frame(width: recordsCollapsed ? 0 : 321, alignment: .trailing)
         .clipped()
         .allowsHitTesting(!recordsCollapsed)
         .disabled(recordsCollapsed)
@@ -186,20 +200,18 @@ struct WorkspaceView: View {
                 HStack { Image(systemName: "magnifyingglass"); TextField("搜索名称、人员或备注", text: $search).textFieldStyle(.plain) }
                     .font(.system(size: 12)).foregroundStyle(Palette.muted).padding(9)
                     .background(Palette.canvas, in: RoundedRectangle(cornerRadius: 8))
-                HStack(spacing: 4) {
+                HStack(spacing: 6) {
                     PeriodPicker(claims: store.claims, period: $period)
-                    Picker("状态", selection: $statusFilter) {
-                        Text("全部状态").tag(nil as ClaimStatus?)
-                        ForEach(ClaimStatus.allCases) { status in
-                            Text(status.rawValue).tag(Optional(status))
-                        }
-                    }.labelsHidden().font(.system(size: 11)).frame(width: 82)
-                        .accessibilityIdentifier("claim-status-filter")
+                    Picker("报销人", selection: $claimantFilter) {
+                        Text("所有报销人").tag("")
+                        ForEach(claimantNames, id: \.self) { Text($0).tag($0) }
+                    }.labelsHidden().frame(width: 88)
                 }.controlSize(.small)
                 HStack {
                     Text("\(filtered.count) 条记录").foregroundStyle(Palette.muted)
                     Spacer()
-                    Button(batch ? "取消" : "批量删除") { batch.toggle(); checked = [] }.buttonStyle(.plain)
+                    Button(batch ? "完成" : "批量删除") { batch.toggle(); checked = [] }
+                        .buttonStyle(ExportButtonStyle(color: batch ? Palette.muted : .red))
                 }.font(.system(size: 11))
                 if batch {
                     HStack {
@@ -207,18 +219,101 @@ struct WorkspaceView: View {
                             checked = checked.count == filtered.count ? [] : Set(filtered.map(\.id))
                         }
                         Spacer()
-                        Button("删除 \(checked.count) 条", role: .destructive) { deleting = checked }.disabled(checked.isEmpty)
+                        Button("删除 \(checked.count) 条", role: .destructive) { deleting = checked }
+                            .buttonStyle(ExportButtonStyle(color: .red)).disabled(checked.isEmpty)
                     }.font(.system(size: 11))
                 }
             }.padding(18).padding(.top, 30)
             Divider().opacity(0.5)
-            ScrollView {
-                LazyVStack(spacing: 8) {
-                    ForEach(filtered) { claim in row(claim) }
-                    if filtered.isEmpty { Text("暂无匹配记录\n点击新建开始记录，或调整筛选条件").font(.system(size: 12)).foregroundStyle(Palette.muted).multilineTextAlignment(.center).padding(.top, 60) }
-                }.padding(12)
-            }
-        }.frame(width: 280).background(.white)
+            GeometryReader { viewport in
+                ScrollView(.vertical, showsIndicators: true) {
+                    NativeOverlayScrollConfigurator()
+                        .frame(width: 0, height: 0)
+                    if filtered.isEmpty {
+                        VStack(spacing: 12) {
+                            Image(systemName: "tray")
+                                .font(.system(size: 27, weight: .light))
+                                .foregroundStyle(Palette.accent)
+                                .frame(width: 62, height: 62)
+                                .background(Palette.accent.opacity(0.1), in: Circle())
+                            Text("暂无报销记录").font(.system(size: 15, weight: .semibold))
+                            Text("点击右上角“新建”开始记录")
+                                .font(.system(size: 11)).foregroundStyle(Palette.muted)
+                        }
+                        .padding(.vertical, 28)
+                        .frame(maxWidth: .infinity)
+                        .background(Palette.canvas, in: RoundedRectangle(cornerRadius: 12))
+                        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Palette.ink.opacity(0.06)))
+                        .frame(maxWidth: .infinity, minHeight: max(340, viewport.size.height), alignment: .center)
+                        .padding(18)
+                    } else {
+                        LazyVStack(spacing: 8) {
+                        ForEach(ClaimStatus.allCases) { status in
+                            let records = filtered.filter { $0.status == status }
+                            let isExpanded = expandedStatuses.contains(status)
+                            VStack(alignment: .leading, spacing: 0) {
+                                Button {
+                                    withAnimation(.easeInOut(duration: 0.24)) {
+                                        if isExpanded { expandedStatuses.remove(status) } else { expandedStatuses.insert(status) }
+                                    }
+                                } label: {
+                                    HStack(spacing: 10) {
+                                        Image(systemName: "chevron.right")
+                                            .font(.system(size: 10, weight: .medium))
+                                            .foregroundStyle(Palette.muted)
+                                            .frame(width: 14)
+                                            .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                                        Image(systemName: status.icon)
+                                            .font(.system(size: 13, weight: .semibold))
+                                            .foregroundStyle(status.color)
+                                            .frame(width: 24, height: 24)
+                                            .background(status.color.opacity(0.12), in: Circle())
+                                        Text(status.rawValue)
+                                            .font(.system(size: 13, weight: .semibold))
+                                            .foregroundStyle(status.color)
+                                        Spacer()
+                                        Text("\(records.count) 条")
+                                            .font(.system(size: 12, weight: .semibold, design: .rounded))
+                                            .foregroundStyle(Palette.muted)
+                                    }
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .frame(height: 42)
+                                    .padding(.horizontal, 11)
+                                    .background(status.color.opacity(isExpanded ? 0.075 : 0.035), in: RoundedRectangle(cornerRadius: 9))
+                                    .overlay(RoundedRectangle(cornerRadius: 9).stroke(status.color.opacity(isExpanded ? 0.18 : 0.08)))
+                                    .contentShape(RoundedRectangle(cornerRadius: 9))
+                                }
+                                .buttonStyle(.plain)
+                                if isExpanded {
+                                    VStack(spacing: 8) {
+                                        ForEach(records) { claim in row(claim) }
+                                    if records.isEmpty {
+                                        VStack(spacing: 6) {
+                                            Image(systemName: "tray")
+                                                .font(.system(size: 16, weight: .light))
+                                                .foregroundStyle(status.color.opacity(0.7))
+                                            Text("此分类暂无记录")
+                                                .font(.system(size: 11, weight: .medium))
+                                                .foregroundStyle(Palette.muted)
+                                        }
+                                        .frame(maxWidth: .infinity, minHeight: 78)
+                                        .background(Palette.canvas, in: RoundedRectangle(cornerRadius: 8))
+                                        }
+                                    }
+                                    .padding(.top, 8)
+                                    .clipped()
+                                    .transition(.opacity)
+                                }
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 4)
+                            .animation(.easeInOut(duration: 0.24), value: isExpanded)
+                        }
+                        }.padding(12)
+                    }
+                }
+            }.frame(maxWidth: .infinity)
+        }.frame(width: 320).background(.white)
     }
     @ViewBuilder private var newButton: some View {
         if let filter {
@@ -245,7 +340,7 @@ struct WorkspaceView: View {
                     }
                     Text(claim.title.isEmpty ? "未命名报销" : claim.title).font(.system(size: 13, weight: .medium)).lineLimit(2).multilineTextAlignment(.leading)
                     Text(Money.format(claim.total)).font(.system(size: 17, weight: .semibold, design: .rounded))
-                    Text(claim.recordDetail).font(.system(size: 10)).foregroundStyle(Palette.muted)
+                    Text(claim.recordListDetail).font(.system(size: 10)).foregroundStyle(Palette.muted)
                         .lineLimit(1).minimumScaleFactor(0.75)
                 }.frame(maxWidth: .infinity, alignment: .leading).padding(14)
                     .padding(.bottom, -5).contentShape(Rectangle())
@@ -269,10 +364,17 @@ struct WorkspaceView: View {
             }
             .contextMenu {
                 Button("预览清单", systemImage: "eye") { store.previewSummary(claim) }
-                Button("复制清单", systemImage: "doc.on.doc") { copySummary(claim) }
+                Button("预览报销单", systemImage: "doc.text.magnifyingglass") {
+                    if claim.kind == .trip { store.previewTripForm(claim) }
+                    else { store.previewReimbursementForm(claim) }
+                }
+                Button("导入发票", systemImage: "tray.and.arrow.down") {
+                    _ = store.chooseAllInvoices(for: claim)
+                }.disabled(store.exporting)
                 Button("导出发票", systemImage: "folder") { store.exportInvoices(claim) }
-                    .disabled(store.exporting || claim.expenses.flatMap(\.attachments).isEmpty)
-                Divider()
+                    .disabled(store.exporting || claim.invoiceCount == 0)
+                Button("打印发票", systemImage: "printer") { store.export([claim]) }
+                    .disabled(store.exporting || claim.invoiceCount == 0)
                 Menu("切换状态") {
                     ForEach(ClaimStatus.allCases) { status in
                         Button(status.rawValue, systemImage: status == claim.status ? "checkmark" : status.icon) { store.setStatus(status, for: claim.id) }
@@ -283,11 +385,43 @@ struct WorkspaceView: View {
             }
     }
     private func navigate(_ kind: ClaimKind?) {
-        store.showSettings = false; home = false; filter = kind; batch = false; checked = []
+        store.showSettings = false; home = false; filter = kind; claimantFilter = ""; batch = false; checked = []
         if !filtered.contains(where: { $0.id == selectedID }) { selectedID = filtered.first?.id }
     }
     private func create(_ kind: ClaimKind) {
-        if let id = store.create(kind, defaults: ExpenseDefaults.saved()) { store.showSettings = false; home = false; selectedID = id; search = ""; period = ClaimPeriodFilter(); statusFilter = nil; batch = false; checked = [] }
+        if let id = store.create(kind, defaults: ExpenseDefaults.saved()) { store.showSettings = false; home = false; selectedID = id; search = ""; claimantFilter = ""; period = ClaimPeriodFilter(); batch = false; checked = [] }
+    }
+}
+
+/// Applies overlay-style native scrolling only to the enclosing report-list
+/// scroll view. Overlay scrollers keep the list width stable while still
+/// appearing automatically when the content overflows and the user scrolls.
+private struct NativeOverlayScrollConfigurator: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        configureLater(view)
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        configureLater(nsView)
+    }
+
+    private func configureLater(_ view: NSView) {
+        DispatchQueue.main.async {
+            var current: NSView? = view
+            while let candidate = current {
+                if let scroll = candidate as? NSScrollView {
+                    scroll.scrollerStyle = .overlay
+                    scroll.autohidesScrollers = true
+                    scroll.hasVerticalScroller = true
+                    scroll.hasHorizontalScroller = false
+                    scroll.verticalScroller?.controlSize = .mini
+                    return
+                }
+                current = candidate.superview
+            }
+        }
     }
 }
 
@@ -345,7 +479,7 @@ struct ClaimTextPreview: View {
             Divider()
             HStack(spacing: 16) {
                 ScrollViewReader { reader in
-                    ScrollView(.horizontal, showsIndicators: false) {
+                    ScrollView(.horizontal, showsIndicators: true) {
                         HStack(spacing: 6) {
                             summaryTab("总览", id: "")
                             ForEach(claim.personBreakdowns) { person in summaryTab(person.name, id: person.id) }
@@ -361,10 +495,11 @@ struct ClaimTextPreview: View {
                 }
             }.padding(.horizontal, 20).padding(.vertical, 14).background(.white)
             Divider()
-            ScrollView {
+            ScrollView(.vertical, showsIndicators: true) {
                 Text(text).font(.system(size: 13, design: .monospaced)).lineSpacing(7)
                     .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading).padding(26)
-            }.id(selectedPersonID)
+            }
+            .id(selectedPersonID)
         }.background(Palette.canvas)
             .onChange(of: selectedPersonID) { _, _ in copied = false }
             .onExitCommand(perform: close)

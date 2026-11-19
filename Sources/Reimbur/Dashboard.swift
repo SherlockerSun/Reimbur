@@ -12,12 +12,12 @@ struct PeriodPicker: View {
             Picker("年份", selection: $period.year) {
                 Text("所有年份").tag(0)
                 ForEach(years, id: \.self) { Text("\(String($0)) 年").tag($0) }
-            }.labelsHidden()
+            }.labelsHidden().frame(width: 88)
             Picker("月份", selection: $period.month) {
                 Text("所有月份").tag(0)
                 ForEach(1...12, id: \.self) { Text("\($0) 月").tag($0) }
-            }.labelsHidden()
-        }.font(.system(size: 11)).help("出差、餐补按首个报销日期筛选；补贴及未选日期的记录按创建日期筛选")
+            }.labelsHidden().frame(width: 88)
+        }.font(.system(size: 11)).help("出差、计日按首个报销日期筛选；其他及未选日期的记录按创建日期筛选")
     }
 }
 
@@ -52,7 +52,7 @@ struct DashboardView: View {
         }
     }
     var body: some View {
-        ScrollView {
+        ScrollView(.vertical, showsIndicators: true) {
             VStack(alignment: .leading, spacing: 24) {
                 HStack {
                     VStack(alignment: .leading, spacing: 8) {
@@ -76,7 +76,7 @@ struct DashboardView: View {
                     }.frame(width: 330)
                 }
                 Card {
-                    SectionLabel(title: "分类统计", subtitle: "出差、餐补按首个报销日；补贴及未选日期的记录按创建日")
+                    SectionLabel(title: "分类统计", subtitle: "出差、计日按首个报销日；其他及未选日期的记录按创建日")
                     ForEach(ClaimKind.allCases) { kind in
                         let items = records.filter { $0.kind == kind }
                         HStack {
@@ -88,7 +88,8 @@ struct DashboardView: View {
                     }
                 }
             }.padding(32).padding(.top, 32)
-        }.frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
             .coordinateSpace(name: coordinateID)
             .overlay(alignment: .topLeading) {
                 GeometryReader { geometry in

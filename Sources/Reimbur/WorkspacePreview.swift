@@ -3,6 +3,7 @@ import SwiftUI
 enum RecordPreviewRequest {
     case summary(Claim, String?)
     case tripForm(Claim)
+    case reimbursementForm(Claim)
 }
 
 struct WorkspacePreviewLayer: View {
@@ -20,6 +21,8 @@ struct WorkspacePreviewLayer: View {
                         ClaimTextPreview(claim: claim, initialPersonID: personID, close: store.dismissPreview)
                     case let .tripForm(claim):
                         TripFormPreview(claim: claim, close: store.dismissPreview)
+                    case let .reimbursementForm(claim):
+                        ReimbursementFormPreview(claim: claim, close: store.dismissPreview)
                     }
                 }
             } else {

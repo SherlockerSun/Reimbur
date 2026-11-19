@@ -7,10 +7,12 @@ struct ExpenseDefaults: Equatable {
     var travelerNames: [String] = []
     var department = ""
     var tripPurpose = ""
+    var mealPurpose = "招待费"
     static func saved(in defaults: UserDefaults = .standard) -> Self {
         func amount(_ key: String) -> Int64 { max(0, min(Money.maximumCents, Int64(defaults.integer(forKey: key)))) }
         return Self(subsidy: amount("defaultSubsidy"), meal: amount("defaultMeal"), travelerNames: AppPreferences.travelerNames(in: defaults),
-                    department: defaults.string(forKey: "defaultDepartment") ?? "", tripPurpose: defaults.string(forKey: "defaultTripPurpose") ?? "")
+                    department: defaults.string(forKey: "defaultDepartment") ?? "", tripPurpose: defaults.string(forKey: "defaultTripPurpose") ?? "",
+                    mealPurpose: defaults.string(forKey: "defaultMealPurpose") ?? "招待费")
     }
     func price(for kind: ExpenseKind) -> Int64 {
         switch kind { case .subsidy: return subsidy; case .meal: return meal; default: return 0 }
@@ -28,10 +30,11 @@ struct SettingsView: View {
     @AppStorage("itineraryNameFormat") private var itineraryFormat = AttachmentNaming.defaultFormat
     @AppStorage("defaultDepartment") private var department = ""
     @AppStorage("defaultTripPurpose") private var tripPurpose = ""
+    @AppStorage("defaultMealPurpose") private var mealPurpose = "招待费"
     @State private var pathCopied = false
     private var version: String { Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "开发版" }
     var body: some View {
-        ScrollView {
+        ScrollView(.vertical, showsIndicators: true) {
             VStack(alignment: .leading, spacing: 22) {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("设置").font(.system(size: 29, weight: .semibold))
@@ -61,13 +64,17 @@ struct SettingsView: View {
                             PeopleTagInput(names: Binding(get: { AppPreferences.decodeNames(travelerNames) }, set: { travelerNames = AppPreferences.encodeNames($0) }))
                         }.frame(maxWidth: .infinity, alignment: .leading)
                         price("出差补助 / 人天", value: $subsidy).frame(maxWidth: .infinity, alignment: .leading)
-                        price("餐补 / 天", value: $meal).frame(maxWidth: .infinity, alignment: .leading)
+                        price("计日 / 天", value: $meal).frame(maxWidth: .infinity, alignment: .leading)
                         LabeledField(title: "部门") {
                             TextField("填写部门", text: $department).accessibilityLabel("部门").modifier(DefaultValueInputStyle())
                         }
                             .frame(maxWidth: .infinity, alignment: .leading)
                         LabeledField(title: "出差事由") {
                             TextField("填写出差事由", text: $tripPurpose).accessibilityLabel("出差事由").modifier(DefaultValueInputStyle())
+                        }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        LabeledField(title: "计日用途") {
+                            TextField("填写计日用途", text: $mealPurpose).accessibilityLabel("计日用途").modifier(DefaultValueInputStyle())
                         }
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
@@ -121,7 +128,8 @@ struct SettingsView: View {
                         .font(.system(size: 11)).foregroundStyle(Palette.muted)
                 }
             }.frame(maxWidth: 920).frame(maxWidth: .infinity, alignment: .leading).padding(32).padding(.top, 32)
-        }.frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
     private func price(_ title: String, value: Binding<Int>) -> some View {
         LabeledField(title: title) {

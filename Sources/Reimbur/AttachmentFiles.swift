@@ -1,4 +1,5 @@
 import AppKit
+import Compression
 import PDFKit
 import Vision
 
@@ -25,11 +26,13 @@ struct TripImportFile {
     var role: ExpenseAttachmentRole
     var invoiceNumber: String?
     var orderNumber: String?
+    var suggestedKind: ExpenseKind?
 }
 
 enum TripImportRecognition {
     static func role(text: String, filename: String) -> ExpenseAttachmentRole {
         let compact = text.replacingOccurrences(of: #"\s"#, with: "", options: .regularExpression)
+        if compact.contains("航空运输电子客票") || compact.contains("航空运输客票") || filename.contains("航空行程单") { return .invoice }
         // Use the first document title: either kind can mention the other in its notes/footer.
         let invoiceTitle = compact.range(of: #"电子(?:普通|专用)?发票|增值税(?:电子)?(?:普通|专用)?发票"#, options: .regularExpression)
         let itineraryTitle = compact.range(of: #"行程单|行程明细|行程证明|用车明细"#, options: .regularExpression)
@@ -39,7 +42,7 @@ enum TripImportRecognition {
         if ["行程单", "行程明细", "行程证明", "用车明细"].contains(where: { filename.contains($0) }) { return .itinerary }
         return .invoice
     }
-    static func inspect(_ source: URL, kind: ExpenseKind) throws -> TripImportFile {
+    static func inspect(_ source: URL, kind: ExpenseKind? = nil) throws -> TripImportFile {
         let scoped = source.startAccessingSecurityScopedResource()
         defer { if scoped { source.stopAccessingSecurityScopedResource() } }
         var text = ""
@@ -48,8 +51,8 @@ enum TripImportRecognition {
             guard let pdf = PDFDocument(url: source), !pdf.isLocked, pdf.pageCount > 0 else {
                 throw ReimburError("\(source.lastPathComponent) 不是有效的 PDF，或文件已加密。")
             }
-            if kind == .taxi {
-                text = (0..<min(pdf.pageCount, 2)).compactMap { pdf.page(at: $0)?.string }.joined(separator: "\n")
+            text = (0..<min(pdf.pageCount, 2)).compactMap { pdf.page(at: $0)?.string }.joined(separator: "\n")
+            if kind == nil || kind == .taxi {
                 if text.trimmingCharacters(in: .whitespacesAndNewlines).count < 12 {
                     for index in 0..<min(pdf.pageCount, 2) {
                         guard let page = pdf.page(at: index) else { continue }
@@ -59,15 +62,26 @@ enum TripImportRecognition {
                 role = Self.role(text: text, filename: source.lastPathComponent)
             }
         } else {
-            guard kind == .taxi, let image = NSImage(contentsOf: source), image.isValid else {
-                throw ReimburError("发票请选择 PDF；打车行程单也支持常见图片。")
+            guard let image = NSImage(contentsOf: source), image.isValid else {
+                throw ReimburError("\(source.lastPathComponent) 无法读取，请选择 PDF 或常见图片。")
             }
-            role = .itinerary
             text = AttachmentRecognition.recognizedText(image: image)
+            role = Self.role(text: text, filename: source.lastPathComponent)
         }
         return TripImportFile(source: source, role: role,
                               invoiceNumber: AttachmentNaming.number(in: text, filename: source.lastPathComponent, role: .invoice),
-                              orderNumber: AttachmentNaming.number(in: text, role: .itinerary))
+                              orderNumber: AttachmentNaming.number(in: text, filename: source.lastPathComponent, role: .itinerary),
+                              suggestedKind: role == .itinerary ? .taxi : classify(text: text, filename: source.lastPathComponent))
+    }
+
+    static func classify(text: String, filename: String) -> ExpenseKind? {
+        let compact = (text + "\n" + filename).folding(options: .widthInsensitive, locale: Locale(identifier: "zh_CN"))
+            .replacingOccurrences(of: #"\s"#, with: "", options: .regularExpression).lowercased()
+        if compact.range(of: #"飞机|航空|航班|登机|机场|机票"#, options: .regularExpression) != nil { return .flight }
+        if compact.range(of: #"火车|铁路|列车|车次|动车|高铁|[gdcztklsy][0-9]{1,4}次"#, options: .regularExpression) != nil { return .train }
+        if compact.range(of: #"住宿|酒店|宾馆|旅馆|客房|入住|退房"#, options: .regularExpression) != nil { return .hotel }
+        if compact.range(of: #"打车|出租|网约车|滴滴|高德|嘀嗒|曹操出行|t3出行|客运服务|运输服务.*客运|用车|行程单|行程明细|行程证明"#, options: .regularExpression) != nil { return .taxi }
+        return nil
     }
 }
 
@@ -79,13 +93,16 @@ struct AttachmentNaming {
         Self(invoiceFormat: defaults.string(forKey: "invoiceNameFormat") ?? defaultFormat,
              itineraryFormat: defaults.string(forKey: "itineraryNameFormat") ?? defaultFormat)
     }
-    func filename(source: URL, number: String?, claim: Claim, expense: Expense, role: ExpenseAttachmentRole) -> String {
+    func filename(source: URL, number: String?, claim: Claim, expense: Expense, role: ExpenseAttachmentRole, claimantOverride: String? = nil) -> String {
         let original = source.deletingPathExtension().lastPathComponent
         let pattern = role == .invoice ? invoiceFormat : itineraryFormat
         var value = pattern.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? Self.defaultFormat : pattern
         let linkedNumbers = Set(expense.invoices.compactMap { $0.number ?? Self.number(in: "", filename: $0.name, role: .invoice) })
         let invoiceNumber = number ?? (role == .itinerary && linkedNumbers.count == 1 ? linkedNumbers.first : nil)
-        let fields = ["报销人": expense.claimant ?? claim.travelerNames?.first ?? "未分配", "发票号码": invoiceNumber ?? original,
+        // File names identify the reimbursement record. Personal attribution is edited in
+        // the detail list and must not change the common prefix of imported files.
+        let primaryClaimant = claimantOverride ?? claim.travelerNames?.first ?? expense.claimant ?? "未分配"
+        let fields = ["报销人": primaryClaimant, "发票号码": invoiceNumber ?? original,
                       "行程单号": number ?? original, "报销名称": claim.title, "费用类型": expense.kind.displayName,
                       "原文件名": original, "日期": claim.dates.sorted().first ?? DayKey.string(claim.createdAt)]
         for (key, replacement) in fields { value = value.replacingOccurrences(of: "{\(key)}", with: replacement) }
@@ -244,20 +261,139 @@ enum InvoiceArchiveExporter {
         for attachment in attachments {
             let original = URL(fileURLWithPath: attachment.name)
             let stem = AttachmentNaming.safeStem(original.deletingPathExtension().lastPathComponent)
-            let ext = original.pathExtension.isEmpty ? "pdf" : original.pathExtension
-            let name = AttachmentNaming.uniqueFilename("\(stem).\(ext)", usedNames: &used)
             let source = attachmentRoot.appendingPathComponent(attachment.storedName)
             guard fm.fileExists(atPath: source.path) else { throw ReimburError("附件已丢失：\(attachment.name)") }
+            // Use the stored source type, not only the editable display name. This keeps
+            // legacy PDFs as .pdf files when their visible name has an outdated extension.
+            let ext = source.pathExtension.isEmpty ? (original.pathExtension.isEmpty ? "pdf" : original.pathExtension) : source.pathExtension
+            let name = AttachmentNaming.uniqueFilename("\(stem).\(ext.lowercased())", usedNames: &used)
             try fm.copyItem(at: source, to: folder.appendingPathComponent(name))
         }
         let archive = staging.appendingPathComponent("output.zip")
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/zip")
-        process.currentDirectoryURL = staging
-        process.arguments = ["-q", "-r", archive.path, folder.lastPathComponent]
-        process.standardError = Pipe()
-        try process.run(); process.waitUntilExit()
-        guard process.terminationStatus == 0 else { throw ReimburError("发票打包失败，原有文件未被覆盖。") }
+        // Generate the ZIP in-process so the UTF-8 filename flag is present. macOS's
+        // system zip omits that flag for Chinese names, which makes Windows Explorer
+        // show the extracted directory as empty.
+        try PortableZipArchive.write(directory: folder, to: archive)
         try Data(contentsOf: archive, options: .mappedIfSafe).write(to: destination, options: .atomic)
+    }
+}
+
+private enum PortableZipArchive {
+    private struct Entry {
+        let name: Data
+        let data: Data
+        let compressed: Data
+        let method: UInt16
+        let crc: UInt32
+        let offset: UInt32
+        let isDirectory: Bool
+    }
+
+    static func write(directory: URL, to destination: URL) throws {
+        let fm = FileManager.default
+        let directoryName = directory.lastPathComponent + "/"
+        let directoryData = Data(directoryName.utf8)
+        var output = Data()
+        var entries: [Entry] = []
+
+        func appendUInt16(_ value: UInt16, to data: inout Data) {
+            var value = value.littleEndian
+            withUnsafeBytes(of: &value) { data.append(contentsOf: $0) }
+        }
+        func appendUInt32(_ value: UInt32, to data: inout Data) {
+            var value = value.littleEndian
+            withUnsafeBytes(of: &value) { data.append(contentsOf: $0) }
+        }
+        func appendHeader(signature: UInt32, version: UInt16, flags: UInt16, method: UInt16,
+                          crc: UInt32, compressedSize: UInt32, size: UInt32, name: Data,
+                          offset: UInt32? = nil, externalAttributes: UInt32 = 0,
+                          to data: inout Data) {
+            appendUInt32(signature, to: &data)
+            if signature == 0x02014b50 {
+                appendUInt16(0x0314, to: &data) // Unix creator, ZIP 2.0
+            }
+            appendUInt16(version, to: &data)
+            appendUInt16(flags, to: &data)
+            appendUInt16(method, to: &data)
+            appendUInt16(0, to: &data) // modification time
+            appendUInt16(0, to: &data) // modification date
+            appendUInt32(crc, to: &data)
+            appendUInt32(compressedSize, to: &data)
+            appendUInt32(size, to: &data)
+            appendUInt16(UInt16(name.count), to: &data)
+            appendUInt16(0, to: &data) // extra length
+            if signature == 0x02014b50 {
+                appendUInt16(0, to: &data) // comment length
+                appendUInt16(0, to: &data) // disk number
+                appendUInt16(0, to: &data) // internal attributes
+                appendUInt32(externalAttributes, to: &data)
+                appendUInt32(offset ?? 0, to: &data)
+            }
+            data.append(contentsOf: name)
+        }
+
+        // Directory entries make the intended extracted folder visible even before
+        // an unzipper has inspected the contained files.
+        appendHeader(signature: 0x04034b50, version: 20, flags: 0x0800, method: 0,
+                     crc: 0, compressedSize: 0, size: 0, name: directoryData, to: &output)
+        entries.append(Entry(name: directoryData, data: Data(), compressed: Data(), method: 0,
+                             crc: 0, offset: 0, isDirectory: true))
+
+        let files = try fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles])
+            .filter { (try? $0.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true }
+            .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+        for file in files {
+            let data = try Data(contentsOf: file, options: .mappedIfSafe)
+            let name = Data((directoryName + file.lastPathComponent).utf8)
+            let crc = crc32(data)
+            let (compressed, method): (Data, UInt16) = deflate(data)
+            let offset = UInt32(output.count)
+            appendHeader(signature: 0x04034b50, version: 20, flags: 0x0800, method: method,
+                         crc: crc, compressedSize: UInt32(compressed.count), size: UInt32(data.count),
+                         name: name, to: &output)
+            output.append(contentsOf: compressed)
+            entries.append(Entry(name: name, data: data, compressed: compressed, method: method,
+                                 crc: crc, offset: offset, isDirectory: false))
+        }
+
+        let centralOffset = UInt32(output.count)
+        for entry in entries {
+            appendHeader(signature: 0x02014b50, version: 20, flags: 0x0800, method: entry.method,
+                         crc: entry.crc, compressedSize: UInt32(entry.compressed.count), size: UInt32(entry.data.count),
+                         name: entry.name, offset: entry.offset, externalAttributes: entry.isDirectory ? 0x10 : 0,
+                         to: &output)
+        }
+        let centralSize = UInt32(output.count) - centralOffset
+        appendUInt32(0x06054b50, to: &output)
+        appendUInt16(0, to: &output); appendUInt16(0, to: &output)
+        appendUInt16(UInt16(entries.count), to: &output); appendUInt16(UInt16(entries.count), to: &output)
+        appendUInt32(centralSize, to: &output); appendUInt32(centralOffset, to: &output)
+        appendUInt16(0, to: &output)
+        try output.write(to: destination, options: .atomic)
+    }
+
+    private static func deflate(_ data: Data) -> (Data, UInt16) {
+        guard !data.isEmpty else { return (data, 0) }
+        var buffer = Data(count: data.count + max(64 * 1024, data.count / 100 + 64))
+        let capacity = buffer.count
+        let count = data.withUnsafeBytes { source in
+            buffer.withUnsafeMutableBytes { target in
+                compression_encode_buffer(target.bindMemory(to: UInt8.self).baseAddress!, capacity,
+                                           source.bindMemory(to: UInt8.self).baseAddress!, data.count,
+                                           nil, COMPRESSION_ZLIB)
+            }
+        }
+        guard count > 0, count < data.count else { return (data, 0) }
+        buffer.count = count
+        return (buffer, 8)
+    }
+
+    private static func crc32(_ data: Data) -> UInt32 {
+        var crc: UInt32 = 0xffffffff
+        for byte in data {
+            crc ^= UInt32(byte)
+            for _ in 0..<8 { crc = (crc & 1) == 1 ? (crc >> 1) ^ 0xedb88320 : crc >> 1 }
+        }
+        return ~crc
     }
 }

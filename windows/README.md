@@ -10,6 +10,9 @@ Windows 10/11 x64 版本，使用 Electron、SQLite（WASM）、PDF.js 构建。
 - 日历点击或拖动多选日期，回扫可撤销。
 - PDF/图片在应用内预览、缩放、拖动、复制和下载。
 - 报销清单支持导入、编辑、复制、上传、删除和 XLSX 导出。
+- 费用明细与报销清单支持批量选择、变更报销人和批量删除；附件悬浮显示首屏缩略图。
+- 报销清单和费用明细默认每页 5 条，可选择或输入每页数量。
+- 右上角“导入发票”可批量混合导入并自动生成费用行；支持 PDF 文字层和图片/扫描件的离线中文 OCR，识别类型、号码、金额、火车路线和乘车日期。
 - 支持导出发票 ZIP，以及每页两张的打印 DOCX。出差报销单和报销单附件排在发票之前，行程单自动裁切底部空白，火车票重复打印两次。
 - 设置默认报销人、部门、出差事由、补助及餐补单价和附件命名格式。
 
@@ -33,4 +36,4 @@ ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-
 npm run pack:win
 ```
 
-输出：`../dist/windows/Reimbur-2.0.0-Windows-x64-Setup.exe`。
+输出：`../dist/Reimbur-2.0.0-Windows-x64-Setup.exe`。

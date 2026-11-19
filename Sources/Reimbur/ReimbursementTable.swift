@@ -1,6 +1,22 @@
 import SwiftUI
 import AppKit
 
+struct ReimbursementPage {
+    let size: Int
+    let count: Int
+    let number: Int
+    let range: Range<Int>
+
+    init(total: Int, page: Int, size: Int) {
+        let total = max(0, total)
+        self.size = max(1, min(500, size))
+        count = total == 0 ? 1 : (total - 1) / self.size + 1
+        number = max(1, min(count, page))
+        let offset = (number - 1) * self.size
+        range = offset..<(offset + min(self.size, total - offset))
+    }
+}
+
 struct ReimbursementColumn: Identifiable {
     var id: String
     var title: String
@@ -39,16 +55,27 @@ struct ReimbursementTable<Row: Identifiable, Cell: View>: View where Row.ID == U
     @State private var ascending: Bool?
     @State private var hovered: UUID?
     @State private var hoveredHeader: String?
+    @AppStorage private var storedPageSize: Int
+    @State private var page = 1
+    var selectable: Bool
+    @Binding private var selectedIDs: Set<UUID>
     private let headerHeight: CGFloat = 42
 
     init(id: String, columns: [ReimbursementColumn], rows: [Row], rowHeight: @escaping (Row) -> CGFloat,
-         sort: @escaping (String, Bool?) -> Void, @ViewBuilder cell: @escaping (Row, Int, ReimbursementColumn) -> Cell) {
+         sort: @escaping (String, Bool?) -> Void, selectable: Bool = false, selectedIDs: Binding<Set<UUID>> = .constant([]), @ViewBuilder cell: @escaping (Row, Int, ReimbursementColumn) -> Cell) {
         self.columns = columns; self.rows = rows; self.rowHeight = rowHeight; self.sort = sort; self.cell = cell
+        self.selectable = selectable; self._selectedIDs = selectedIDs
         // The revised defaults replace the old, independently stretched column layout.
         _storedWidths = AppStorage(wrappedValue: Data(), "reimbursement.columns.v2.\(id)")
+        _storedPageSize = AppStorage(wrappedValue: 5, "reimbursement.pageSize.v2.\(id)")
     }
     private var overrides: [String: Double] { (try? JSONDecoder().decode([String: Double].self, from: storedWidths)) ?? [:] }
-    private var contentHeight: CGFloat { headerHeight + rows.reduce(0) { $0 + rowHeight($1) } }
+    private var query: ReimbursementPage { ReimbursementPage(total: rows.count, page: page, size: storedPageSize) }
+    private var pageSize: Int { query.size }
+    private var pageCount: Int { query.count }
+    private var pageOffset: Int { query.range.lowerBound }
+    private var visibleRows: [Row] { Array(rows[query.range]) }
+    private var contentHeight: CGFloat { headerHeight + visibleRows.reduce(0) { $0 + rowHeight($1) } }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -64,8 +91,8 @@ struct ReimbursementTable<Row: Identifiable, Cell: View>: View where Row.ID == U
                     if let column = columns.last {
                         VStack(spacing: 0) {
                             header(column, width: operationWidth)
-                            ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
-                                cell(row, index, column).frame(maxWidth: .infinity, alignment: .center)
+                            ForEach(Array(visibleRows.enumerated()), id: \.element.id) { index, row in
+                                cell(row, pageOffset + index, column).frame(maxWidth: .infinity, alignment: .center)
                                     .frame(width: operationWidth, height: rowHeight(row))
                                     .background(rowBackground(row, index: index))
                                     .overlay(alignment: .bottom) { Divider().opacity(0.45) }
@@ -94,27 +121,36 @@ struct ReimbursementTable<Row: Identifiable, Cell: View>: View where Row.ID == U
                         }
                     }
             }.frame(height: contentHeight)
+            pagination
             Text("拖动实线调整相邻列宽 · 点击表头排序 · 悬浮查看完整内容")
                 .font(.system(size: 10)).foregroundStyle(Palette.muted)
         }
+        .onAppear { page = min(page, pageCount) }
+        .onChange(of: rows.count) { _, _ in page = min(page, pageCount) }
+        .onChange(of: storedPageSize) { _, _ in page = min(page, pageCount) }
     }
     private func tableContent(widths: [CGFloat], viewport: CGFloat) -> some View {
         VStack(spacing: 0) {
             HStack(spacing: 0) {
                 ForEach(Array(columns.dropLast().enumerated()), id: \.element.id) { index, column in header(column, width: widths[index]) }
             }.background(Palette.canvas)
-            ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
+            ForEach(Array(visibleRows.enumerated()), id: \.element.id) { index, row in
                 HStack(spacing: 0) {
                     ForEach(Array(columns.dropLast().enumerated()), id: \.element.id) { columnIndex, column in
                         Group {
-                            if column.id == "sequence" { Text("\(index + 1)").monospacedDigit().foregroundStyle(Palette.muted).font(.system(size: 11)) }
-                            else { cell(row, index, column) }
+                            if column.id == "sequence", selectable {
+                                Toggle("选择第\(pageOffset + index + 1)行", isOn: Binding(get: { selectedIDs.contains(row.id) }, set: { value in
+                                    if value { selectedIDs.insert(row.id) } else { selectedIDs.remove(row.id) }
+                                })).toggleStyle(.checkbox).labelsHidden().accessibilityLabel("选择第\(pageOffset + index + 1)行")
+                            } else {
+                                cell(row, pageOffset + index, column)
+                            }
                         }.frame(maxWidth: .infinity, alignment: .center)
                             .padding(.horizontal, 10).frame(width: widths[columnIndex], height: rowHeight(row), alignment: .center).clipped()
                     }
                 }.background(rowBackground(row, index: index))
                     .overlay(alignment: .bottom) { Divider().opacity(0.45) }
-                    .onHover { hovered = $0 ? row.id : nil }.accessibilityIdentifier("table-row-\(index + 1)")
+                    .onHover { hovered = $0 ? row.id : nil }.accessibilityIdentifier("table-row-\(pageOffset + index + 1)")
             }
         }.overlay(alignment: .topLeading) {
             ForEach(0..<max(0, columns.count - 2), id: \.self) { index in
@@ -135,6 +171,26 @@ struct ReimbursementTable<Row: Identifiable, Cell: View>: View where Row.ID == U
             Button("恢复默认列宽") { storedWidths = Data(); offset = 0 }
         }
     }
+    private var pagination: some View {
+        HStack(spacing: 8) {
+            Text("共 \(rows.count) 条").foregroundStyle(Palette.muted)
+            Spacer(minLength: 0)
+            Text("每页").foregroundStyle(Palette.muted)
+            PageSizeField(selection: Binding(get: { pageSize }, set: setPageSize))
+                .frame(width: 72, height: 24).help("选择或输入每页数量（1–500）")
+            Text("条").foregroundStyle(Palette.muted)
+            Button { page = max(1, page - 1) } label: { Image(systemName: "chevron.left") }
+                .buttonStyle(.borderless).disabled(page <= 1).accessibilityLabel("上一页")
+            Text("第 \(page) / \(pageCount) 页").monospacedDigit().foregroundStyle(Palette.muted)
+            Button { page = min(pageCount, page + 1) } label: { Image(systemName: "chevron.right") }
+                .buttonStyle(.borderless).disabled(page >= pageCount).accessibilityLabel("下一页")
+        }.font(.system(size: 10)).frame(minHeight: 24)
+    }
+    private func setPageSize(_ value: Int) {
+        let next = max(1, min(500, value))
+        if next != pageSize { page = 1 }
+        storedPageSize = next
+    }
     private func applyResize(index: Int, delta: CGFloat, viewport: CGFloat) {
         guard let start = resizeStart else { return }
         let visibleBoundary = start.prefix(index + 1).reduce(0, +) - offset
@@ -146,14 +202,57 @@ struct ReimbursementTable<Row: Identifiable, Cell: View>: View where Row.ID == U
     private func rowBackground(_ row: Row, index: Int) -> Color {
         hovered == row.id ? Palette.accent.opacity(0.055) : index.isMultiple(of: 2) ? .white : Palette.canvas.opacity(0.65)
     }
-    private func header(_ column: ReimbursementColumn, width: CGFloat) -> some View {
-        TableColumnHeader(title: column.title, sortable: column.id != "sequence" && column.id != "operations",
+    @ViewBuilder private func header(_ column: ReimbursementColumn, width: CGFloat) -> some View {
+        if column.id == "sequence", selectable {
+            Toggle("当前页全选", isOn: Binding(get: { !visibleRows.isEmpty && visibleRows.allSatisfy { selectedIDs.contains($0.id) } }, set: { value in
+                let ids = Set(visibleRows.map(\.id))
+                if value { selectedIDs.formUnion(ids) } else { selectedIDs.subtract(ids) }
+            })).toggleStyle(.checkbox).labelsHidden().help("勾选当前分页全部记录").accessibilityLabel("当前分页全选")
+                .frame(width: width, height: headerHeight)
+        } else {
+            TableColumnHeader(title: column.title, sortable: column.id != "sequence" && column.id != "operations",
                           direction: sortedColumn == column.id ? ascending : nil, hovering: hoveredHeader == column.id) {
             let next: Bool? = sortedColumn != column.id ? true : ascending == true ? false : nil
             sortedColumn = next == nil ? nil : column.id
             ascending = next
+            page = 1
             sort(column.id, next)
-        }.frame(width: width, height: headerHeight).background(Palette.canvas)
+            }.frame(width: width, height: headerHeight).background(Palette.canvas)
+        }
+    }
+}
+
+private struct PageSizeField: NSViewRepresentable {
+    @Binding var selection: Int
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+    func makeNSView(context: Context) -> NSComboBox {
+        let field = NSComboBox()
+        field.addItems(withObjectValues: ["5", "10", "20", "50", "100"])
+        field.isEditable = true; field.completes = false
+        field.font = .systemFont(ofSize: 11); field.alignment = .center
+        field.controlSize = .small; field.delegate = context.coordinator
+        field.setAccessibilityLabel("每页数量")
+        return field
+    }
+    func updateNSView(_ field: NSComboBox, context: Context) {
+        context.coordinator.parent = self
+        if field.currentEditor() == nil { field.stringValue = String(selection) }
+    }
+    final class Coordinator: NSObject, NSComboBoxDelegate {
+        var parent: PageSizeField
+        init(_ parent: PageSizeField) { self.parent = parent }
+        func comboBoxSelectionDidChange(_ notification: Notification) {
+            guard let field = notification.object as? NSComboBox,
+                  let text = field.objectValueOfSelectedItem as? String, let value = Int(text) else { return }
+            parent.selection = value
+        }
+        func controlTextDidEndEditing(_ notification: Notification) {
+            guard let field = notification.object as? NSComboBox else { return }
+            if let value = Int(field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)), value > 0 {
+                parent.selection = max(1, min(500, value))
+            }
+            field.stringValue = String(parent.selection)
+        }
     }
 }
 
@@ -217,6 +316,8 @@ private struct ThinTableScrollbar: View {
     @Binding var offset: CGFloat
     @State private var initialOffset: CGFloat?
     @State private var hovering = false
+    @State private var scrolling = false
+    @State private var scrollToken = UUID()
     var body: some View {
         GeometryReader { geometry in
             if contentWidth > viewport + 0.5 {
@@ -229,9 +330,17 @@ private struct ThinTableScrollbar: View {
                     Capsule().fill(Palette.muted.opacity(0.5)).frame(width: thumb, height: 4)
                         .offset(x: min(max(0, offset), maximum) / maximum * travel)
                 }.frame(height: 12).padding(.horizontal, 2)
-                    .opacity(hovering || initialOffset != nil ? 1 : 0)
-                    .animation(.easeOut(duration: 0.15), value: hovering || initialOffset != nil)
+                    .opacity(hovering || scrolling || initialOffset != nil ? 1 : 0)
+                    .animation(.easeOut(duration: 0.15), value: hovering || scrolling || initialOffset != nil)
                     .contentShape(Rectangle()).onHover { hovering = $0 }
+                    .onChange(of: offset) { _, _ in
+                        scrolling = true
+                        let token = UUID()
+                        scrollToken = token
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                            if scrollToken == token { scrolling = false }
+                        }
+                    }
                     .gesture(DragGesture(minimumDistance: 0).onChanged { value in
                         if initialOffset == nil { initialOffset = offset }
                         offset = min(max(0, (initialOffset ?? 0) + value.translation.width / travel * maximum), maximum)

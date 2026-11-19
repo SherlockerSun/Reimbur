@@ -17,10 +17,12 @@ struct ClaimRecordFilter {
     var status: ClaimStatus?
     var period = ClaimPeriodFilter()
     var search = ""
+    var claimant = ""
     func matches(_ claim: Claim) -> Bool {
         (kind == nil || claim.kind == kind) && (status == nil || claim.status == status) && period.matches(claim) &&
         (search.isEmpty || claim.title.localizedCaseInsensitiveContains(search) || claim.note.localizedCaseInsensitiveContains(search) ||
-         (claim.travelerNames ?? []).contains { $0.localizedCaseInsensitiveContains(search) })
+         (claim.travelerNames ?? []).contains { $0.localizedCaseInsensitiveContains(search) }) &&
+        (claimant.isEmpty || (claim.travelerNames ?? []).contains(claimant) || claim.expenses.contains { $0.claimant == claimant })
     }
 }
 

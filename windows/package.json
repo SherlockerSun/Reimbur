@@ -14,11 +14,15 @@
   "dependencies": {
     "archiver": "6.0.2",
     "docx": "8.5.0",
+    "node-fetch": "^2.7.0",
     "pdfjs-dist": "3.11.174",
     "sql.js": "1.10.3",
+    "tesseract.js": "^5.1.1",
     "xlsx": "0.18.5"
   },
   "devDependencies": {
+    "@tesseract.js-data/chi_sim": "^1.0.0",
+    "@tesseract.js-data/eng": "^1.0.0",
     "electron": "28.3.3",
     "electron-builder": "24.13.3"
   },
@@ -28,10 +32,24 @@
     "artifactName": "Reimbur-${version}-Windows-${arch}-Setup.${ext}",
     "asar": true,
     "asarUnpack": [
-      "node_modules/sql.js/dist/sql-wasm.wasm"
+      "node_modules/sql.js/dist/sql-wasm.wasm",
+      "node_modules/tesseract.js/**",
+      "node_modules/tesseract.js-core/**",
+      "node_modules/bmp-js/**",
+      "node_modules/idb-keyval/**",
+      "node_modules/is-electron/**",
+      "node_modules/is-url/**",
+      "node_modules/node-fetch/**",
+      "node_modules/whatwg-url/**",
+      "node_modules/tr46/**",
+      "node_modules/webidl-conversions/**",
+      "node_modules/regenerator-runtime/**",
+      "node_modules/wasm-feature-detect/**",
+      "node_modules/zlibjs/**",
+      "electron/ocr-lang/**"
     ],
     "directories": {
-      "output": "../dist/windows",
+      "output": "../dist",
       "buildResources": "assets"
     },
     "files": [

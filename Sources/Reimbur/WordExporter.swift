@@ -54,10 +54,19 @@ enum WordExporter {
                     for index in 0..<pdf.pageCount {
                         try autoreleasepool {
                             guard let page = pdf.page(at: index) else { throw ReimburError("无法读取 \(attachment.name) 第 \(index + 1) 页。") }
-                            let bounds = page.bounds(for: .mediaBox)
+                            // Many electronic invoices keep a portrait MediaBox while the
+                            // actual invoice is stored in a landscape CropBox. Rendering the
+                            // MediaBox adds a large blank area and makes the invoice look tiny
+                            // in the two-up document. CropBox also excludes platform footer
+                            // marks (such as the stray "didi" text) outside the invoice.
+                            let displayBox: PDFDisplayBox = {
+                                let crop = page.bounds(for: .cropBox)
+                                return crop.width > 0 && crop.height > 0 ? .cropBox : .mediaBox
+                            }()
+                            let bounds = page.bounds(for: displayBox)
                             guard bounds.width > 0, bounds.height > 0 else { throw ReimburError("PDF 页面尺寸无效。") }
                             let scale = min(3.5, 2600 / max(bounds.width, bounds.height))
-                            let image = page.thumbnail(of: NSSize(width: bounds.width * scale, height: bounds.height * scale), for: .mediaBox)
+                            let image = page.thumbnail(of: NSSize(width: bounds.width * scale, height: bounds.height * scale), for: displayBox)
                             try addImage(image, title: "\(expense.kind.displayName) · \(role) · \(attachment.name) · 第 \(index + 1)/\(pdf.pageCount) 页",
                                          itinerary: !isInvoice, copies: copies)
                         }

@@ -19,7 +19,7 @@ struct ExpenseGroupTabs: View {
         var settling = false
     }
     var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
+        ScrollView(.horizontal, showsIndicators: true) {
             HStack(spacing: 9) {
                 ForEach(claim.expenseGroups) { group in
                     tab(group)

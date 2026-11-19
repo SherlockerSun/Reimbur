@@ -26,6 +26,155 @@
   function compactDate(date = new Date()) { return dayKey(date).replaceAll('-', ''); }
   function displayKind(kind) { return kind === '补助' ? '补贴' : kind; }
 
+  function classifyInvoice(text, filename = '') {
+    const compact = `${text}\n${filename}`.normalize('NFKC').replace(/\s+/g, '');
+    if (/飞机|航空|航班|登机|机场|机票/i.test(compact)) return '飞机';
+    if (/火车|铁路|列车|车次|动车|高铁|[GDCZTKLSY]\d{1,4}次/i.test(compact)) return '火车';
+    if (/住宿|酒店|宾馆|旅馆|客房|入住|退房/i.test(compact)) return '住宿';
+    if (/打车|出租|网约车|滴滴|高德|嘀嗒|曹操出行|T3出行|客运服务|运输服务.*客运|用车|行程单|行程明细|行程证明/i.test(compact)) return '打车';
+    return null;
+  }
+
+  function normalizeRecognitionText(value) {
+    return String(value || '').normalize('NFKC').replace(/\r/g, '\n').replace(/\u00a0/g, ' ');
+  }
+
+  function documentRole(text, filename = '') {
+    const compact = normalizeRecognitionText(text).replace(/\s+/g, '');
+    if (/航空运输电子客票|航空运输客票/.test(compact) || /航空行程单/.test(filename)) return 'invoice';
+    const invoice = /电子(?:普通|专用)?发票|增值税(?:电子)?(?:普通|专用)?发票/.exec(compact);
+    const itinerary = /行程单|行程明细|行程证明|用车明细/.exec(compact);
+    if (invoice && itinerary) return invoice.index < itinerary.index ? 'invoice' : 'itinerary';
+    if (invoice) return 'invoice';
+    if (itinerary) return 'itinerary';
+    if (/行程单|行程明细|行程证明|用车明细/.test(filename)) return 'itinerary';
+    return 'invoice';
+  }
+
+  function invoiceNumber(text, filename = '', role = 'invoice') {
+    const compact = normalizeRecognitionText(text).replace(/\s+/g, '');
+    const stem = String(filename || '').replace(/\.[^.]+$/, '');
+    let match;
+    if (role === 'itinerary') {
+      match = compact.match(/(?:行程单(?:编号|号)|订单号)[：:]?([A-Z0-9-]{6,40})/i);
+      if (match) return match[1];
+    }
+    match = compact.match(/(?:发票(?:号码|编号)|票据号码)[：:]?(\d{8,20})(?!\d)/i);
+    if (match) return match[1];
+    match = compact.match(/(?:^|\D)(\d{20})(?!\d)/);
+    if (match) return match[1];
+    match = stem.match(/(?:^|\D)(\d{20}|\d{8})(?!\d)/);
+    return match?.[1] || null;
+  }
+
+  function invoiceAmount(text) {
+    const compact = normalizeRecognitionText(text)
+      .replace(/[ \t\u00a0]/g, '')
+      .replace(/−/g, '-');
+    const value = '([-]?(?:[0-9]{1,3}(?:,[0-9]{3})+|[0-9]{1,9})(?:\\.[0-9]{1,2})?)(?![0-9.,])';
+    const patterns = [
+      new RegExp('(?:\\(小写\\)|小写金额|小写)[：:]*[¥￥XY]?' + value, 'i'),
+      new RegExp('价税合计[^0-9¥￥XY-]{0,100}[¥￥XY]?' + value, 'i'),
+      new RegExp('票价(?:\\([^)\\n]{0,12}\\))?[：:]*(?:人民币|CNY|RMB)?[¥￥XY]?' + value, 'i'),
+      new RegExp('(?:实付金额|支付金额|应付金额|合计金额|总金额|票面金额|金额合计|含税金额|实付)[：:]*[¥￥XY]?' + value, 'i')
+    ];
+    for (const pattern of patterns) {
+      const match = compact.match(pattern);
+      if (!match) continue;
+      const cents = parseCents(match[1].replace(/,/g, ''));
+      if (cents != null) return cents;
+    }
+    return null;
+  }
+
+  function cityFromStation(value) {
+    const aliases = {
+      '上海虹桥': '上海', '上海松江': '上海', '安亭北': '上海', '安亭西': '上海',
+      '北京丰台': '北京', '北京朝阳': '北京', '北京大兴': '北京', '大兴机场': '北京', '清河': '北京',
+      '滨海': '天津', '滨海西': '天津', '滨海北': '天津', '塘沽': '天津', '天津滨海': '天津',
+      '汉口': '武汉', '武昌': '武汉', '武汉东': '武汉',
+      '广州白云': '广州', '广州新塘': '广州', '新塘': '广州',
+      '深圳坪山': '深圳', '深圳机场': '深圳', '福田': '深圳', '平湖': '深圳',
+      '杭州萧山': '杭州', '杭州余杭': '杭州', '余杭': '杭州', '临平南': '杭州', '富阳': '杭州',
+      '庄桥': '宁波', '宁波庄桥': '宁波', '绍兴柯桥': '绍兴', '成都天府': '成都',
+      '苏州园区': '苏州', '苏州新区': '苏州', '无锡新区': '无锡', '惠山': '无锡',
+      '沙坪坝': '重庆', '重庆沙坪坝': '重庆'
+    };
+    let name = String(value || '').replace(/[：:]/g, '').trim();
+    for (const suffix of ['火车站', '高铁站', '铁路站', '站']) {
+      if (name.endsWith(suffix)) { name = name.slice(0, -suffix.length); break; }
+    }
+    if (aliases[name]) return aliases[name];
+    if (name.length > 2 && !['黔东南', '黔西南'].includes(name) && /[东西南北]$/.test(name)) name = name.slice(0, -1);
+    return name;
+  }
+
+  function trainRoute(text) {
+    const normalized = normalizeRecognitionText(text)
+      .replace(/(?<=[\u3400-\u9fff])[ \t\u00a0]+(?=[\u3400-\u9fff])/g, '');
+    const station = '([\\u3400-\\u9fff]{2,16})';
+    const origin = normalized.match(new RegExp('(?:出发站|出发地|起始站|始发站|乘车站|发站|起始地)[ \\t]*[：:]?[ \\t]*([\\u3400-\\u9fff]{2,16}?)(?=\\s*(?:到达站|到达地|终到站|终点站|到站|目的地|$))'));
+    const destination = normalized.match(new RegExp('(?:到达站|到达地|终到站|终点站|到站|目的地)[ \\t]*[：:]?[ \\t]*([\\u3400-\\u9fff]{2,16}?)(?=\\n|\\s*(?:出发站|出发地|起始站|始发站|乘车站|发站|起始地|乘车日期|乘车时间|日期|时间|票价|金额|座位|车次|备注|[GDCZTKLSY]\\d|$))'));
+    if (origin && destination) return { origin: origin[1], destination: destination[1] };
+    const arrow = normalized.match(new RegExp(station + '\\s*(?:→|➜|⟶|->|—>|-->|至)\\s*' + station));
+    if (arrow) return { origin: arrow[1], destination: arrow[2] };
+    const lines = normalized.split('\n').map(line => line.trim()).filter(Boolean);
+    const trainIndex = lines.findIndex(line => /^[GDCZTKLSY]\d{1,4}次?$/i.test(line.replace(/\s+/g, '')));
+    if (trainIndex > 0 && trainIndex + 1 < lines.length) {
+      let before = trainIndex - 1, after = trainIndex + 1;
+      while (before >= 0 && !/^[\u3400-\u9fff]{2,16}$/.test(lines[before])) before--;
+      while (after < lines.length && !/^[\u3400-\u9fff]{2,16}$/.test(lines[after])) after++;
+      if (before >= 0 && after < lines.length) return { origin: lines[before], destination: lines[after] };
+    }
+    const sameLineTrain = normalized.match(new RegExp('^\\s*' + station + '\\s*\\n?[A-Za-z\\s]*\\s*[GDCZTKLSY]\\d{1,4}次?\\s*' + station, 'im'));
+    if (sameLineTrain) return { origin: sameLineTrain[1], destination: sameLineTrain[2] };
+    const excluded = ['发票', '样本', '金额', '合计', '铁路', '客票', '旅客', '姓名', '证件', '购买', '销售', '名称', '项目', '税', '座', '票价', '备注', '开票', '出发', '到达', '乘车', '车次', '时间', '日期', '身份证'];
+    for (const line of lines) {
+      if (excluded.some(word => line.includes(word))) continue;
+      const parts = line.split(/\s+/);
+      if (parts.length === 2 && parts.every(part => /^[\u3400-\u9fff]{2,12}$/.test(part))) {
+        return { origin: parts[0], destination: parts[1] };
+      }
+    }
+    return null;
+  }
+
+  function validDayKey(year, month, day) {
+    const y = Number(year), m = Number(month), d = Number(day);
+    const value = new Date(y, m - 1, d);
+    if (value.getFullYear() !== y || value.getMonth() !== m - 1 || value.getDate() !== d) return null;
+    return `${String(y).padStart(4, '0')}-${pad(m)}-${pad(d)}`;
+  }
+
+  function railTimes(text) {
+    const normalized = normalizeRecognitionText(text).replace(/[ \t\u00a0]+/g, '');
+    const date = '((?:19|20)\\d{2})\\s*[年/.-]\\s*(\\d{1,2})\\s*[月/.-]\\s*(\\d{1,2})\\s*日?';
+    const clock = '(\\d{1,2})\\s*[:时]\\s*(\\d{2})\\s*分?';
+    const extract = pattern => {
+      const match = normalized.match(pattern);
+      return match ? validDayKey(match[1], match[2], match[3]) : null;
+    };
+    let departure = extract(new RegExp('(?:出发时间|出发日期|发车时间|开车时间|乘车时间|乘车日期)[：:]?\\s*' + date));
+    const arrival = extract(new RegExp('(?:到达时间|到达日期|抵达时间|抵达日期)[：:]?\\s*' + date));
+    if (!departure) departure = extract(new RegExp(date + '\\s*' + clock + '\\s*(?:开|发车)'));
+    return departure || arrival ? { departure, arrival } : null;
+  }
+
+  function recognizeDocument(text, filename = '', preferredKind = null) {
+    const role = preferredKind && preferredKind !== '打车' ? 'invoice' : documentRole(text, filename);
+    const suggestedKind = role === 'itinerary' ? '打车' : classifyInvoice(text, filename);
+    const kind = suggestedKind || preferredKind;
+    const number = invoiceNumber(text, filename, role);
+    const amount = role === 'invoice' ? invoiceAmount(text) : null;
+    const route = role === 'invoice' && kind === '火车' ? trainRoute(text) : null;
+    const times = role === 'invoice' && kind === '火车' ? railTimes(text) : null;
+    return {
+      role, suggestedKind, number, amount: amount ?? 0, route, railTimes: times,
+      date: times?.departure || times?.arrival || null,
+      cityRoute: route ? { origin: cityFromStation(route.origin), destination: cityFromStation(route.destination) } : null
+    };
+  }
+
   function parseCents(value) {
     const normalized = String(value ?? '').trim().replaceAll(',', '');
     if (!/^\d{1,9}(\.\d{0,2})?$/.test(normalized)) return null;
@@ -75,7 +224,7 @@
   function defaultSettings() {
     return {
       traveler: '', department: '', tripPurpose: '', subsidyPrice: '50.00', mealPrice: '30.00',
-      caption: '轻记每一笔，安心每一天', invoiceFormat: '{报销人}{发票号码}', itineraryFormat: '{报销人}{行程单号}',
+      mealPurpose: '招待费', caption: '轻记每一笔，安心每一天', invoiceFormat: '{报销人}{发票号码}', itineraryFormat: '{报销人}{行程单号}',
       startup: 'home'
     };
   }
@@ -85,7 +234,7 @@
     const names = String(settings.traveler || '').split(/[，,、\s]+/).map(v => v.trim()).filter(Boolean);
     const claim = {
       id, title: `${displayKind(kind)}报销${compactDate(now)}`, kind, savedStatus: '未报销',
-      reimbursementPurpose: '', department: settings.department || '', tripPurpose: kind === '出差' ? settings.tripPurpose || '' : '',
+      reimbursementPurpose: kind === '餐补' ? settings.mealPurpose || '招待费' : '', department: settings.department || '', tripPurpose: kind === '出差' ? settings.tripPurpose || '' : '',
       allowanceAmount: kind === '补助' ? 0 : null, travelers: names.length, travelerNames: names,
       dates: [], note: '', expenses: [], expenseOrder: [], defaultExpenseRowOrder: [], defaultLedgerRowOrder: [],
       covers: [], createdAt: now.toISOString(), updatedAt: now.toISOString(), invoiceLedgerEntries: kind === '出差' ? null : []
@@ -329,11 +478,12 @@
   }
 
   return {
-    KINDS, TRIP_TYPES, STATUSES, TYPE_LABEL, uuid, clone, pad, dayKey, compactDate, displayKind,
+    KINDS, TRIP_TYPES, STATUSES, TYPE_LABEL, uuid, clone, pad, dayKey, compactDate, displayKind, classifyInvoice,
+    normalizeRecognitionText, documentRole, invoiceNumber, invoiceAmount, cityFromStation, trainRoute, railTimes, recognizeDocument,
     parseCents, centsFromNumber, inputMoney, formatMoney, chineseMoney, defaultSettings,
     createClaim, makeExpense, uniqueNames, normalize, syncLedger, expenseDays, expenseTotal,
     claimTotal, invoiceTotal, invoiceCount, difference, personNames, personExpenses, personDates,
     personDays, reimbursementDayCount, reimbursementDates, recordDetail, ledgerPurpose,
-    ledgerRows, filterClaims, summaryText, stats, sanitizeFilename, uniqueFilename, itineraryPrintCrop, attachFilename
+    expenseTypeOrder, ledgerRows, filterClaims, summaryText, stats, sanitizeFilename, uniqueFilename, itineraryPrintCrop, attachFilename
   };
 });

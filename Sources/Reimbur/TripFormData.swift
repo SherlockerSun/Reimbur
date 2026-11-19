@@ -1,6 +1,12 @@
 import Foundation
 
 struct TripFormData {
+    private struct TrainLegKey: Hashable {
+        var departureDay: String
+        var arrivalDay: String
+        var origin: String
+        var destination: String
+    }
     struct OtherCost {
         var title: String
         var count: Int
@@ -13,7 +19,12 @@ struct TripFormData {
     var subsidies: [Int: Int64] = [:]
     var otherCosts: [OtherCost] = []
     var rowCount: Int = 7
-    var name: String { person?.name ?? (claim.travelerNames ?? []).joined(separator: "、") }
+    var name: String {
+        if let person { return person.name }
+        var names = claim.travelerNames ?? []
+        for name in expenses.compactMap(\.claimant) where !names.contains(name) { names.append(name) }
+        return names.joined(separator: "、")
+    }
     var total: Int64 { expenses.reduce(0) { $0 + $1.total(in: claim) } }
     var fare: Int64 { legs.reduce(0) { $0 + $1.total(in: claim) } }
     var subsidy: Int64 { subsidies.values.reduce(0, +) }
@@ -25,7 +36,34 @@ struct TripFormData {
         self.claim = claim
         self.person = person
         expenses = person?.expenses ?? claim.withPeopleAssigned.expenses
-        legs = RailMoment.ordered(expenses.filter { $0.kind == .train || $0.kind == .flight })
+        let sourceLegs = RailMoment.ordered(expenses.filter { $0.kind == .train || $0.kind == .flight })
+        var groupedLegs: [Expense] = []
+        var groupedTrainIndex: [TrainLegKey: Int] = [:]
+        for leg in sourceLegs {
+            guard leg.kind == .train,
+                  let departureDay = RailMoment.dayKey(leg.departureTime),
+                  let arrivalDay = leg.effectiveArrivalDate,
+                  !leg.originCity.isEmpty, !leg.destinationCity.isEmpty else {
+                groupedLegs.append(leg)
+                continue
+            }
+            let key = TrainLegKey(departureDay: departureDay, arrivalDay: arrivalDay,
+                                  origin: leg.originCity, destination: leg.destinationCity)
+            if let index = groupedTrainIndex[key] {
+                var merged = groupedLegs[index]
+                let amount = merged.total(in: claim) + leg.total(in: claim)
+                merged.invoices.append(contentsOf: leg.invoices)
+                if let itineraries = leg.itineraries {
+                    merged.itineraries = (merged.itineraries ?? []) + itineraries
+                }
+                merged.setTotalAmount(amount)
+                groupedLegs[index] = merged
+            } else {
+                groupedTrainIndex[key] = groupedLegs.count
+                groupedLegs.append(leg)
+            }
+        }
+        legs = groupedLegs
         func cost(_ title: String, kind: ExpenseKind?) -> OtherCost {
             let items = expenses.filter { $0.kind == kind }
             return OtherCost(title: title, count: items.reduce(0) { $0 + $1.invoices.count }, amount: items.reduce(0) { $0 + $1.total(in: claim) })

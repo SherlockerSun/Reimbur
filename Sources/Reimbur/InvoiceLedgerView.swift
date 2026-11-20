@@ -117,7 +117,7 @@ struct InvoiceLedgerView: View {
         } message: { action in
             switch action {
             case let .claimant(_, count): Text("将变更所选的 \(count) 行及对应费用归属。")
-            case let .delete(ids): Text("将删除所选的 \(ids.count) 行发票明细。")
+            case let .delete(ids): Text("将删除所选的 \(ids.count) 行清单及对应费用明细。")
             }
         }
     }

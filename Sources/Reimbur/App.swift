@@ -40,18 +40,17 @@ struct WorkspaceView: View {
     @State private var selectedID: UUID?
     @State private var search = ""
     @State private var period = ClaimPeriodFilter()
-    @State private var claimantFilter = ""
     @State private var batch = false
     @State private var checked = Set<UUID>()
     @State private var deleting = Set<UUID>()
     @State private var renaming: UUID?
     @State private var newTitle = ""
     private var filtered: [Claim] {
-        store.claims.filter(ClaimRecordFilter(kind: filter, status: nil, period: period, search: search, claimant: claimantFilter).matches)
+        store.claims.filter(ClaimRecordFilter(kind: filter, status: nil, period: period, search: search).matches)
             .sorted { $0.createdAt > $1.createdAt }
     }
-    private var claimantNames: [String] {
-        Array(Set(store.claims.flatMap { ($0.travelerNames ?? []) + $0.expenses.compactMap(\.claimant) })).sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+    private var expandedClaims: [Claim] {
+        filtered.filter { expandedStatuses.contains($0.status) }
     }
     var body: some View {
         HStack(spacing: 0) {
@@ -62,28 +61,12 @@ struct WorkspaceView: View {
                 DashboardView(claims: store.claims, period: $period)
             } else {
                 recordPanel
-                if let claim = store.claims.first(where: { $0.id == selectedID }) {
-                    ClaimEditor(claim: claim).id(claim.id)
-                } else {
-                    VStack(spacing: 18) {
-                        Image(systemName: "doc.text.below.ecg").font(.system(size: 48, weight: .light)).foregroundStyle(Palette.accent)
-                        Text("选择一条报销记录，或新建开始记录").font(.system(size: 18))
-                        newButton
-                    }.frame(maxWidth: .infinity, maxHeight: .infinity)
-                }
+                detailPane
             }
         }
         .animation(.easeInOut(duration: 0.32), value: recordsCollapsed)
         .animation(.easeInOut(duration: 0.26), value: menuCollapsed)
         .background(Palette.canvas).foregroundStyle(Palette.ink).textFieldStyle(.roundedBorder)
-        .overlay(alignment: .topLeading) {
-            if !home && !store.showSettings {
-                recordToggle
-                    .padding(.leading, (menuCollapsed ? 76 : 210) + (recordsCollapsed ? 0 : 321))
-                    .padding(.top, 5)
-                    .animation(.easeInOut(duration: 0.32), value: recordsCollapsed)
-            }
-        }
         .alert("操作未完成", isPresented: Binding(get: { store.errorMessage != nil }, set: { if !$0 { store.errorMessage = nil } })) {
             Button("知道了") { store.errorMessage = nil }
         } message: { Text(store.errorMessage ?? "") }
@@ -129,7 +112,7 @@ struct WorkspaceView: View {
         }
         .onChange(of: store.claims.map(\.id)) { old, new in
             if let added = new.first(where: { !old.contains($0) }) {
-                store.showSettings = false; home = false; selectedID = added; period = ClaimPeriodFilter(); search = ""; claimantFilter = ""
+                store.showSettings = false; home = false; selectedID = added; period = ClaimPeriodFilter(); search = ""
                 if let kind = store.claims.first(where: { $0.id == added })?.kind, filter != nil && filter != kind { filter = kind }
             } else if !new.contains(selectedID ?? UUID()) { selectedID = filtered.first?.id }
             checked.formIntersection(new)
@@ -137,6 +120,24 @@ struct WorkspaceView: View {
         .onChange(of: filtered.map(\.id)) { _, ids in
             checked.formIntersection(ids)
             if !ids.contains(selectedID ?? UUID()) { selectedID = ids.first }
+        }
+    }
+
+    private var detailPane: some View {
+        ZStack(alignment: .topLeading) {
+            detailContent.frame(maxWidth: .infinity, maxHeight: .infinity)
+            recordToggle.padding(.leading, 6).padding(.top, 5)
+        }
+    }
+    @ViewBuilder private var detailContent: some View {
+        if let claim = store.claims.first(where: { $0.id == selectedID }) {
+            ClaimEditor(claim: claim).id(claim.id)
+        } else {
+            VStack(spacing: 18) {
+                Image(systemName: "doc.text.below.ecg").font(.system(size: 48, weight: .light)).foregroundStyle(Palette.accent)
+                Text("选择一条报销记录，或新建开始记录").font(.system(size: 18))
+                newButton
+            }.frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 
@@ -200,29 +201,27 @@ struct WorkspaceView: View {
                 HStack { Image(systemName: "magnifyingglass"); TextField("搜索名称、人员或备注", text: $search).textFieldStyle(.plain) }
                     .font(.system(size: 12)).foregroundStyle(Palette.muted).padding(9)
                     .background(Palette.canvas, in: RoundedRectangle(cornerRadius: 8))
-                HStack(spacing: 6) {
-                    PeriodPicker(claims: store.claims, period: $period)
-                    Picker("报销人", selection: $claimantFilter) {
-                        Text("所有报销人").tag("")
-                        ForEach(claimantNames, id: \.self) { Text($0).tag($0) }
-                    }.labelsHidden().frame(width: 88)
-                }.controlSize(.small)
+                PeriodPicker(claims: store.claims, period: $period)
+                    .controlSize(.small)
                 HStack {
                     Text("\(filtered.count) 条记录").foregroundStyle(Palette.muted)
                     Spacer()
-                    Button(batch ? "完成" : "批量删除") { batch.toggle(); checked = [] }
-                        .buttonStyle(ExportButtonStyle(color: batch ? Palette.muted : .red))
-                }.font(.system(size: 11))
-                if batch {
-                    HStack {
-                        Button(checked.count == filtered.count && !filtered.isEmpty ? "取消全选" : "全选") {
-                            checked = checked.count == filtered.count ? [] : Set(filtered.map(\.id))
+                    if batch {
+                        let expandedIDs = Set(expandedClaims.map(\.id))
+                        let allExpandedSelected = !expandedIDs.isEmpty && expandedIDs.isSubset(of: checked)
+                        Button(allExpandedSelected ? "取消全选" : "全选") {
+                            if allExpandedSelected {
+                                checked.subtract(expandedIDs)
+                            } else {
+                                checked.formUnion(expandedIDs)
+                            }
                         }
-                        Spacer()
                         Button("删除 \(checked.count) 条", role: .destructive) { deleting = checked }
                             .buttonStyle(ExportButtonStyle(color: .red)).disabled(checked.isEmpty)
-                    }.font(.system(size: 11))
-                }
+                    }
+                    Button(batch ? "完成" : "批量删除") { batch.toggle(); checked = [] }
+                        .buttonStyle(ExportButtonStyle(color: batch ? Palette.muted : .red))
+                }.font(.system(size: 11)).buttonStyle(.plain)
             }.padding(18).padding(.top, 30)
             Divider().opacity(0.5)
             GeometryReader { viewport in
@@ -385,11 +384,11 @@ struct WorkspaceView: View {
             }
     }
     private func navigate(_ kind: ClaimKind?) {
-        store.showSettings = false; home = false; filter = kind; claimantFilter = ""; batch = false; checked = []
+        store.showSettings = false; home = false; filter = kind; batch = false; checked = []
         if !filtered.contains(where: { $0.id == selectedID }) { selectedID = filtered.first?.id }
     }
     private func create(_ kind: ClaimKind) {
-        if let id = store.create(kind, defaults: ExpenseDefaults.saved()) { store.showSettings = false; home = false; selectedID = id; search = ""; claimantFilter = ""; period = ClaimPeriodFilter(); batch = false; checked = [] }
+        if let id = store.create(kind, defaults: ExpenseDefaults.saved()) { store.showSettings = false; home = false; selectedID = id; search = ""; period = ClaimPeriodFilter(); batch = false; checked = [] }
     }
 }
 

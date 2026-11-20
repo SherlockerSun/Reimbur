@@ -417,7 +417,7 @@ struct Claim: Codable, Identifiable, Equatable {
     var recordDetail: String { (kind == .allowance ? "" : "\(reimbursementDayCount)天 · ") + "\(travelerCount)人 · \(kind != .trip ? invoiceLedgerEntries?.count ?? expenses.count : expenses.count)笔 · \(invoiceCount)份发票" }
     var recordListDetail: String {
         let claimant = travelerNames?.first ?? expenses.compactMap(\.claimant).first ?? "未填写"
-        return "\(claimant)·\(recordDetail)"
+        return "\(claimant) · \(recordDetail)"
     }
     var reimbursementDates: Set<String> {
         if kind == .allowance { return [] }

@@ -33,7 +33,7 @@ private final class ClaimantImportPanelController: NSObject, NSWindowDelegate {
         status = NSTextField(labelWithString: "")
         super.init()
         panel.delegate = self
-        panel.title = "选择报销人"
+        panel.title = "上传发票"
         panel.isFloatingPanel = true
         panel.level = .modalPanel
         panel.hidesOnDeactivate = false
@@ -41,7 +41,7 @@ private final class ClaimantImportPanelController: NSObject, NSWindowDelegate {
         panel.backgroundColor = .windowBackgroundColor
 
         let content = NSView(frame: NSRect(x: 0, y: 0, width: 470, height: 300))
-        let title = NSTextField(labelWithString: "选择报销人")
+        let title = NSTextField(labelWithString: "上传发票")
         title.font = .systemFont(ofSize: 20, weight: .semibold)
         title.frame = NSRect(x: 36, y: 235, width: 398, height: 28)
         let detail = NSTextField(labelWithString: "本次导入的发票将归入所选报销人。")
@@ -60,7 +60,7 @@ private final class ClaimantImportPanelController: NSObject, NSWindowDelegate {
         status.frame = NSRect(x: 36, y: 102, width: 398, height: 22)
         status.isHidden = true
         progress.isHidden = true
-        let upload = NSButton(title: "上传发票", target: self, action: #selector(uploadAction))
+        let upload = NSButton(title: "选择文件", target: self, action: #selector(uploadAction))
         upload.bezelStyle = .rounded
         upload.keyEquivalent = "\r"
         upload.frame = NSRect(x: 234, y: 20, width: 96, height: 32)
@@ -415,7 +415,8 @@ private final class ClaimantImportPanelController: NSObject, NSWindowDelegate {
                 if availableCandidates.count == 1, let matched = availableCandidates.first { expenseID = matched }
                 else if candidates.isEmpty, file.invoiceNumber == nil, file.orderNumber == nil, importedInvoiceIDs.count == 1, hasFreeSlot(importedInvoiceIDs[0]) {
                     expenseID = importedInvoiceIDs[0]
-                } else if let ordered = itineraryFallbackIDs.dropFirst(fallbackItineraryIndex).first(where: hasFreeSlot) {
+                } else if candidates.isEmpty, file.invoiceNumber == nil, file.orderNumber == nil,
+                          let ordered = itineraryFallbackIDs.dropFirst(fallbackItineraryIndex).first(where: hasFreeSlot) {
                     // Some taxi itinerary PDFs contain no stable invoice/order number.
                     // Pair those files with imported invoices in the selection order.
                     expenseID = ordered
@@ -427,7 +428,13 @@ private final class ClaimantImportPanelController: NSObject, NSWindowDelegate {
                 }
                 updated = try importFiles([file.source], into: updated, expenseID: expenseID, role: .itinerary, naming: naming, persist: false)
             }
+            let preferredIDs = Set(updated.attachments.map(\.id)).subtracting(originalIDs)
+            let deduplicated = persist
+                ? deduplicateInvoiceNumbers(in: updated, preferredIDs: preferredIDs)
+                : (updated, [])
+            updated = deduplicated.0
             guard !persist || save(updated) else { throw ReimburError(errorMessage ?? "保存导入清单失败。") }
+            if persist { deduplicated.1.forEach(discardFile) }
             return updated
         } catch {
             for attachment in updated.attachments where !originalIDs.contains(attachment.id) { discardFile(attachment) }
@@ -438,7 +445,7 @@ private final class ClaimantImportPanelController: NSObject, NSWindowDelegate {
     func chooseTripFiles(for claim: Claim, kind: ExpenseKind) -> Claim? {
         let panel = NSOpenPanel()
         panel.title = "导入"
-        panel.allowedContentTypes = kind == .taxi ? [.pdf, .png, .jpeg, .heic, .tiff, .bmp, .gif] : [.pdf]
+        panel.allowedContentTypes = [.pdf]
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
         guard panel.runModal() == .OK else { return nil }
@@ -455,7 +462,7 @@ private final class ClaimantImportPanelController: NSObject, NSWindowDelegate {
             guard let self, let controller else { return }
             let panel = NSOpenPanel()
             panel.title = "导入发票"
-            panel.allowedContentTypes = [.pdf, .png, .jpeg, .heic, .tiff, .bmp, .gif]
+            panel.allowedContentTypes = [.pdf]
             panel.allowsMultipleSelection = true
             panel.canChooseDirectories = false
             guard panel.runModal() == .OK, !panel.urls.isEmpty else { return }
@@ -552,13 +559,90 @@ private final class ClaimantImportPanelController: NSObject, NSWindowDelegate {
                     progress?(0.35 + 0.55 * Double(updated.expenses.filter { $0.kind == kind }.flatMap(\.attachments).count) / Double(max(1, sources.count)))
                 }
             }
+            let preferredIDs = Set(updated.attachments.map(\.id)).subtracting(originalIDs)
+            let deduplicated = deduplicateInvoiceNumbers(in: updated, preferredIDs: preferredIDs)
+            updated = deduplicated.0
             guard save(updated) else { throw ReimburError(errorMessage ?? "保存导入清单失败。") }
+            deduplicated.1.forEach(discardFile)
             progress?(1)
             return updated
         } catch {
             for attachment in updated.attachments where !originalIDs.contains(attachment.id) { discardFile(attachment) }
             throw error
         }
+    }
+
+    private func deduplicateInvoiceNumbers(in claim: Claim,
+                                           preferredIDs: Set<UUID> = [],
+                                           preferredExpenseIDs: Set<UUID> = []) -> (Claim, [Attachment]) {
+        func key(_ number: String?) -> String? {
+            guard let number else { return nil }
+            let normalized = number.replacingOccurrences(of: #"[\s-]"#, with: "", options: .regularExpression).uppercased()
+            return normalized.isEmpty ? nil : normalized
+        }
+        struct Occurrence {
+            var expenseID: UUID
+            var invoiceIndex: Int
+            var attachment: Attachment
+        }
+        var groups: [String: [Occurrence]] = [:]
+        for expense in claim.expenses {
+            for (index, invoice) in expense.invoices.enumerated() {
+                guard let value = key(invoice.number) else { continue }
+                groups[value, default: []].append(Occurrence(expenseID: expense.id, invoiceIndex: index, attachment: invoice))
+            }
+        }
+        var updated = claim
+        var removed: [Attachment] = []
+        for group in groups.values where group.count > 1 && group.contains(where: { preferredIDs.contains($0.attachment.id) }) {
+            let anchor = group.first { preferredExpenseIDs.contains($0.expenseID) }
+                ?? group.first { !preferredIDs.contains($0.attachment.id) }
+                ?? group[0]
+            let winner = group.last { preferredIDs.contains($0.attachment.id) } ?? group[group.count - 1]
+            guard let targetIndex = updated.expenses.firstIndex(where: { $0.id == anchor.expenseID }) else { continue }
+            let winnerExpense = updated.expenses.first { $0.id == winner.expenseID }
+            let duplicateIDs = Set(group.map(\.attachment.id))
+            let entries = updated.invoiceLedgerEntries ?? []
+            let anchorEntryIndex = entries.firstIndex { duplicateIDs.contains($0.invoiceID ?? UUID()) }
+            let entryTemplate = anchorEntryIndex.map { entries[$0] }
+                ?? entries.last { winner.attachment.id == $0.invoiceID }
+
+            for index in updated.expenses.indices {
+                updated.expenses[index].invoices.removeAll { duplicateIDs.contains($0.id) }
+            }
+            var target = updated.expenses[targetIndex]
+            let insertionIndex = min(anchor.invoiceIndex, target.invoices.count)
+            target.invoices.insert(winner.attachment, at: insertionIndex)
+            if let claimant = winnerExpense?.claimant { target.claimant = claimant }
+            if target.origin.isEmpty, let origin = winnerExpense?.origin { target.origin = origin }
+            if target.destination.isEmpty, let destination = winnerExpense?.destination { target.destination = destination }
+            if target.departureTime == nil { target.departureTime = winnerExpense?.departureTime }
+            if target.arrivalTime == nil { target.arrivalTime = winnerExpense?.arrivalTime }
+            if target.synchronizesInvoiceTotal { target.setTotalAmount(target.invoiceTotal) }
+            updated.expenses[targetIndex] = target
+
+            if var rows = updated.invoiceLedgerEntries {
+                rows.removeAll { duplicateIDs.contains($0.invoiceID ?? UUID()) }
+                if var entry = entryTemplate {
+                    entry.expenseID = target.id
+                    entry.invoiceID = winner.attachment.id
+                    entry.reimbursementAmount = winner.attachment.amount
+                    rows.insert(entry, at: min(anchorEntryIndex ?? rows.count, rows.count))
+                }
+                updated.invoiceLedgerEntries = rows
+            }
+            removed += group.compactMap { $0.attachment.id == winner.attachment.id ? nil : $0.attachment }
+
+            let occurrenceExpenseIDs = Set(group.map(\.expenseID)).subtracting([target.id])
+            let removableExpenses = occurrenceExpenseIDs.filter { id in
+                updated.expenses.first { $0.id == id }?.attachments.isEmpty == true
+            }
+            if !removableExpenses.isEmpty {
+                updated.expenses.removeAll { removableExpenses.contains($0.id) }
+                updated.invoiceLedgerEntries?.removeAll { removableExpenses.contains($0.expenseID) }
+            }
+        }
+        return (updated, removed)
     }
 
     func moveItinerary(_ attachment: Attachment, in claim: Claim, from sourceID: UUID, to destinationID: UUID) -> Claim? {
@@ -627,12 +711,27 @@ private final class ClaimantImportPanelController: NSObject, NSWindowDelegate {
     }
 
     func removeLedgerRow(_ id: UUID, in claim: Claim) -> Claim? {
-        guard let row = claim.invoiceLedgerEntries?.first(where: { $0.id == id }) else { return nil }
-        if let invoice = claim.expenses.first(where: { $0.id == row.expenseID })?.invoices.first(where: { $0.id == row.invoiceID }) {
-            return removeAttachment(invoice, from: claim, expenseID: row.expenseID)
+        guard let row = claim.invoiceLedgerEntries?.first(where: { $0.id == id }),
+              let expenseIndex = claim.expenses.firstIndex(where: { $0.id == row.expenseID }) else { return nil }
+        var updated = claim
+        let expense = updated.expenses[expenseIndex]
+        let invoice = expense.invoices.first { $0.id == row.invoiceID }
+        updated.invoiceLedgerEntries?.removeAll { $0.id == id }
+        updated.expenses[expenseIndex].invoices.removeAll { $0.id == row.invoiceID }
+
+        var removed = invoice.map { [$0] } ?? []
+        if updated.expenses[expenseIndex].invoices.isEmpty {
+            removed += updated.expenses[expenseIndex].attachments
+            let expenseID = updated.expenses[expenseIndex].id
+            updated.expenses.remove(at: expenseIndex)
+            updated.invoiceLedgerEntries?.removeAll { $0.expenseID == expenseID }
+        } else if updated.expenses[expenseIndex].synchronizesInvoiceTotal {
+            updated.expenses[expenseIndex].synchronizeInvoiceTotal()
         }
-        var updated = claim; updated.invoiceLedgerEntries?.removeAll { $0.id == id }
-        return save(updated) ? updated : nil
+        guard save(updated) else { return nil }
+        var discarded = Set<UUID>()
+        for attachment in removed where discarded.insert(attachment.id).inserted { discardFile(attachment) }
+        return updated.withPeopleAssigned
     }
 
     func chooseLedgerRowInvoice(_ id: UUID, in claim: Claim) -> Claim? {
@@ -677,14 +776,77 @@ private final class ClaimantImportPanelController: NSObject, NSWindowDelegate {
         return updated.withPeopleAssigned
     }
 
+    func replaceExpenseAttachment(_ existing: Attachment?, in claim: Claim, expenseID: UUID,
+                                  role: ExpenseAttachmentRole, with source: URL) throws -> Claim {
+        guard let expenseIndex = claim.expenses.firstIndex(where: { $0.id == expenseID }) else {
+            throw ReimburError("费用项目已不存在。")
+        }
+        let originalIDs = Set(claim.attachments.map(\.id))
+        let oldAttachments = role == .invoice ? claim.expenses[expenseIndex].invoices : (claim.expenses[expenseIndex].itineraries ?? [])
+        let oldIDs = Set(oldAttachments.map(\.id))
+        let oldEntryIndex = claim.invoiceLedgerEntries?.firstIndex { oldIDs.contains($0.invoiceID ?? UUID()) }
+        let oldEntry = oldEntryIndex.flatMap { claim.invoiceLedgerEntries?[$0] }
+        var base = claim
+        if role == .invoice {
+            base.expenses[expenseIndex].invoices.removeAll { oldIDs.contains($0.id) }
+            base.invoiceLedgerEntries?.removeAll { oldIDs.contains($0.invoiceID ?? UUID()) }
+        } else {
+            base.expenses[expenseIndex].itineraries?.removeAll { oldIDs.contains($0.id) }
+        }
+
+        var added: Attachment?
+        do {
+            var updated = try importFiles([source], into: base, expenseID: expenseID, role: role, persist: false)
+            guard let updatedIndex = updated.expenses.firstIndex(where: { $0.id == expenseID }) else {
+                throw ReimburError("费用项目已不存在。")
+            }
+            let newAttachments = updated.attachments.filter { !originalIDs.contains($0.id) && !oldIDs.contains($0.id) }
+            guard let newest = role == .invoice
+                    ? updated.expenses[updatedIndex].invoices.last
+                    : updated.expenses[updatedIndex].itineraries?.last,
+                  newAttachments.contains(where: { $0.id == newest.id }) else {
+                throw ReimburError(role == .invoice ? "上传发票失败。" : "上传行程单失败。")
+            }
+            added = newest
+            if role == .invoice, var entry = oldEntry, var rows = updated.invoiceLedgerEntries {
+                rows.removeAll { $0.invoiceID == newest.id }
+                entry.expenseID = expenseID
+                entry.invoiceID = newest.id
+                entry.reimbursementAmount = newest.amount
+                rows.insert(entry, at: min(oldEntryIndex ?? rows.count, rows.count))
+                updated.invoiceLedgerEntries = rows
+            }
+            let deduplicated = deduplicateInvoiceNumbers(in: updated, preferredIDs: [newest.id],
+                                                          preferredExpenseIDs: [expenseID])
+            updated = deduplicated.0
+            guard save(updated) else { throw ReimburError(errorMessage ?? "保存附件失败。") }
+            var discarded = Set<UUID>()
+            for attachment in oldAttachments + deduplicated.1 where discarded.insert(attachment.id).inserted {
+                if attachment.id != newest.id { discardFile(attachment) }
+            }
+            return updated
+        } catch {
+            if let added { discardFile(added) }
+            throw error
+        }
+    }
+
     func chooseFiles(for claim: Claim, expenseID: UUID?, role: ExpenseAttachmentRole = .invoice) -> Claim? {
         let panel = NSOpenPanel()
         panel.title = expenseID == nil ? "上传报销单图片" : role == .itinerary ? "上传打车行程单" : "上传 PDF 发票"
         panel.allowedContentTypes = expenseID == nil ? [.png, .jpeg, .heic, .tiff, .bmp, .gif] : role == .itinerary ? [.pdf, .png, .jpeg, .heic, .tiff, .bmp, .gif] : [.pdf]
-        panel.allowsMultipleSelection = true
+        panel.allowsMultipleSelection = expenseID == nil
         panel.canChooseDirectories = false
         guard panel.runModal() == .OK else { return nil }
-        do { return try importFiles(panel.urls, into: claim, expenseID: expenseID, role: role) }
+        do {
+            if let expenseID, let source = panel.url {
+                let existing = role == .invoice
+                    ? claim.expenses.first { $0.id == expenseID }?.invoices.first
+                    : claim.expenses.first { $0.id == expenseID }?.itineraries?.first
+                return try replaceExpenseAttachment(existing, in: claim, expenseID: expenseID, role: role, with: source)
+            }
+            return try importFiles(panel.urls, into: claim, expenseID: expenseID, role: role)
+        }
         catch { errorMessage = error.localizedDescription; return nil }
     }
 

@@ -171,30 +171,25 @@ private struct TripExpenseCell: View {
         HStack(spacing: 3) {
             TableActionButton(title: "复制第\(number)行", icon: "doc.on.doc") { files.duplicateExpense(expense.id) }
             if current.kind.acceptsInvoices {
-                TableActionPopover(title: "第\(number)行附件操作", icon: "square.and.arrow.up") { dismiss in
-                    Button("上传发票", systemImage: "doc.badge.plus") { dismiss(); files.upload(expense.id, .invoice) }
+                TableActionMenu(title: "第\(number)行附件操作", icon: "square.and.arrow.up") {
+                    Button("上传发票") { files.upload(expense.id, .invoice) }
                     if current.kind == .taxi {
-                        Button("上传行程单", systemImage: "list.bullet.rectangle") { dismiss(); files.upload(expense.id, .itinerary) }
-                            .disabled((current.itineraries ?? []).count >= max(1, current.invoices.count))
+                        Button("上传行程单") { files.upload(expense.id, .itinerary) }
                     }
-                    if !current.attachments.isEmpty {
+                    if !current.invoices.isEmpty || (current.kind == .taxi && !(current.itineraries ?? []).isEmpty) {
                         Divider()
-                        Menu("移除附件") {
-                            ForEach(current.attachments) { attachment in
-                                Button(attachment.name, role: .destructive) { dismiss(); files.remove(attachment, expense.id) }
+                    }
+                    if !current.invoices.isEmpty {
+                        if let invoice = current.invoices.first {
+                            Button("移除发票", role: .destructive) {
+                                files.remove(invoice, expense.id)
                             }
                         }
                     }
-                    if current.kind == .taxi, !(current.itineraries ?? []).isEmpty {
-                        Menu("调整行程单归属") {
-                            ForEach(current.itineraries ?? []) { attachment in
-                                Menu(attachment.name) {
-                                    ForEach(claim.expenses.filter { $0.kind == .taxi && $0.id != expense.id && !$0.invoices.isEmpty && ($0.itineraries ?? []).count < $0.invoices.count }) { target in
-                                        Button("\(target.claimant ?? "未分配") · \(target.invoices.first?.number ?? target.invoices.first?.name ?? "发票")") {
-                                            dismiss(); files.move(attachment, expense.id, target.id)
-                                        }
-                                    }
-                                }
+                    if current.kind == .taxi {
+                        if let itinerary = current.itineraries?.first {
+                            Button("移除行程单", role: .destructive) {
+                                files.remove(itinerary, expense.id)
                             }
                         }
                     }

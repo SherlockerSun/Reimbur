@@ -122,7 +122,7 @@ swift run Reimbur
 
 # 构建应用
 ./scripts/build-app.sh
-open dist/Reimbur-v2.0.0-macOS-arm64.dmg
+open dist/Reimbur-v3.0.0-macOS-arm64.dmg
 
 # 指定 Apple Silicon 架构
 REIMBUR_BUILD_ARCH=arm64 ./scripts/build-app.sh

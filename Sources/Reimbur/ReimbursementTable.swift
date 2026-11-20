@@ -433,17 +433,22 @@ struct TableActionButton: View {
     }
 }
 
-struct TableActionPopover<Content: View>: View {
+struct TableActionMenu<Content: View>: View {
     var title: String
     var icon: String
-    @ViewBuilder var content: (@escaping () -> Void) -> Content
-    @State private var showing = false
+    @ViewBuilder var content: Content
+    @State private var hovering = false
     var body: some View {
-        TableActionButton(title: title, icon: icon) { showing = true }
-            .popover(isPresented: $showing) {
-                VStack(alignment: .leading, spacing: 12) { content { showing = false } }
-                    .font(.system(size: 12)).padding(14).frame(minWidth: 150, alignment: .leading)
-            }
+        Menu {
+            content
+        } label: {
+            Image(systemName: icon).symbolRenderingMode(.monochrome).foregroundStyle(Palette.muted)
+                .frame(width: 27, height: 29).contentShape(Rectangle())
+        }
+        .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+        .tint(Palette.muted)
+        .background(hovering ? Palette.accent.opacity(0.09) : .clear, in: RoundedRectangle(cornerRadius: 5))
+        .onHover { hovering = $0 }.help(title).accessibilityLabel(title)
     }
 }
 

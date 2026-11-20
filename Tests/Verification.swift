@@ -856,7 +856,10 @@ final class ReimburChecks {
             expectTrue(file.name.hasPrefix("张三"))
             expectTrue(FileManager.default.fileExists(atPath: store.url(for: file).path))
         }
-        let source = claim.expenses.first { $0.invoices.isEmpty }!
+        guard let source = claim.expenses.first(where: { $0.invoices.isEmpty }) else {
+            fail("Mixed import must retain an unlinked itinerary row: \(claim.expenses.map { ($0.invoices.compactMap(\.number), $0.itineraries ?? []) })")
+            return
+        }
         let target = claim.expenses.first { $0.invoices.first?.number == "12345678901234567890" }!
         claim = store.moveItinerary(source.itineraries![0], in: claim, from: source.id, to: target.id)!
         expectEqual(claim.total, 10000)
@@ -871,11 +874,11 @@ final class ReimburChecks {
         expectThrowsError(try store.importTripFiles([a, bad], into: claim, kind: .taxi))
         expectEqual(ClaimStore(root: store.root).claims[0], before)
         expectEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path).sorted(), beforeNames)
-        // Duplicate imports retain independent rows and unique filenames.
+        // Re-importing the same invoice number replaces the existing invoice.
         claim = try store.importTripFiles([a, a], into: claim, kind: .taxi)
-        expectEqual(claim.invoiceCount, 4)
+        expectEqual(claim.invoiceCount, 2)
         expectEqual(Set(claim.attachments.map(\.name)).count, claim.attachments.count)
-        expectEqual(claim.total, 17600)
+        expectEqual(claim.total, 10000)
         // A rejected final save also removes copied files rather than resurrecting a deleted record.
         var deleted = Claim.make(.trip); deleted.expenses = []; deleted.setTravelerNames(["李四"])
         expectTrue(store.save(deleted)); expectTrue(store.delete(deleted))
@@ -883,14 +886,14 @@ final class ReimburChecks {
         expectThrowsError(try store.importTripFiles([a, b], into: deleted, kind: .taxi))
         expectEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path).sorted(), savedNames)
         expectFalse(store.claims.contains { $0.id == deleted.id })
-        // Trains remain one row per file, even for multi-page PDFs, with route and amount recognition.
+        // Re-importing the same train invoice replaces it instead of adding another row.
         var rail = Claim.make(.trip); rail.expenses = []; rail.setTravelerNames(["张三"])
         let ticket = temporary.appendingPathComponent("车票.pdf")
         try makePDF(at: ticket, pages: 2, number: "22345678901234567890", amount: "553.00")
         rail = try store.importTripFiles([ticket, ticket], into: rail, kind: .train)
-        expectEqual(rail.expenses.count, 2)
-        expectEqual(rail.invoiceCount, 2)
-        expectEqual(rail.total, 110600)
+        expectEqual(rail.expenses.count, 1)
+        expectEqual(rail.invoiceCount, 1)
+        expectEqual(rail.total, 55300)
         expectTrue(rail.expenses.allSatisfy { $0.origin == "上海" && $0.destination == "杭州" && $0.invoices[0].pageCount == 2 })
         // A scanned itinerary uses local OCR, while image itineraries remain outside invoice totals.
         let pdf = PDFDocument(url: itinerary)!
@@ -1448,7 +1451,7 @@ final class ReimburChecks {
                 (view as? NSPopUpButton).map { [$0] } ?? view.subviews.flatMap(pickers)
             }
             let filters = pickers(host).filter { picker in ["所有年份", "所有月份", "全部状态"].contains { picker.itemTitles.contains($0) } }
-            expectEqual(filters.count, 3)
+            expectEqual(filters.count, 2)
             let tops = filters.map { host.convert($0.bounds.origin, from: $0).y }
             expectLessThan((tops.max() ?? 0) - (tops.min() ?? 0), 4)
             @MainActor func snapshot(_ name: String) {
@@ -1460,11 +1463,11 @@ final class ReimburChecks {
             nativeClick(NSPoint(x: 100, y: 958), in: host, window: window); pumpNativeEvents(0.4)
             expectTrue(defaults.bool(forKey: "menuCollapsed"))
             snapshot("menu-icons.png")
-            nativeClick(NSPoint(x: 38, y: 924), in: host, window: window)
+            nativeClick(NSPoint(x: 38, y: 914), in: host, window: window)
             expectTrue(store.showSettings)
-            nativeClick(NSPoint(x: 38, y: 970), in: host, window: window); pumpNativeEvents(0.4)
+            nativeClick(NSPoint(x: 38, y: 964), in: host, window: window); pumpNativeEvents(0.4)
             expectFalse(defaults.bool(forKey: "menuCollapsed"))
-            nativeClick(NSPoint(x: 80, y: 194), in: host, window: window)
+            nativeClick(NSPoint(x: 80, y: 199), in: host, window: window)
             expectFalse(store.showSettings)
         }
     }
@@ -1664,7 +1667,7 @@ final class ReimburChecks {
             expectEqual(claim.total, 6000)
             expectEqual(claim.ledgerReimbursementTotal, 46977)
             expectEqual(claim.invoiceTotal, 46977)
-            expectEqual(claim.ledgerPurpose, kind == .meal ? "餐补报销" : "电脑报销")
+            expectEqual(claim.ledgerPurpose, "电脑报销")
             claim.invoiceLedgerEntries?[0].reimbursementAmount = 20000
             claim.invoiceLedgerEntries?[1].reimbursementAmount = 0
             claim.invoiceLedgerEntries?[0].detail = "电脑电源 & 适配器"
@@ -2349,6 +2352,50 @@ final class ReimburChecks {
         // A stale or mismatched deletion must not delete another expense's file.
         expectNil(store.removeAttachment(retained, from: claim, expenseID: UUID()))
         expectTrue(FileManager.default.fileExists(atPath: store.url(for: retained).path))
+    }
+
+    @MainActor func testAttachmentReplacementInvoiceDedupAndLedgerRowDeletion() throws {
+        let store = ClaimStore(root: temporary.appendingPathComponent("db"))
+        var claim = Claim.make(.trip)
+        claim.expenses = []
+        claim.setTravelerNames(["张三"])
+        let invoiceA = temporary.appendingPathComponent("打车发票A.pdf")
+        let invoiceB = temporary.appendingPathComponent("打车发票B.pdf")
+        let itineraryA = temporary.appendingPathComponent("行程单A.pdf")
+        let itineraryB = temporary.appendingPathComponent("行程单B.pdf")
+        try makeTripImportPDF(invoiceA, lines: ["电子发票（普通发票）", "*运输服务*客运服务", "发票号码：12345678901234567790", "价税合计 ¥38.00"])
+        try makeTripImportPDF(invoiceB, lines: ["电子发票（普通发票）", "*运输服务*客运服务", "发票号码：12345678901234567795", "价税合计 ¥62.00"])
+        try makeTripImportPDF(itineraryA, lines: ["高德地图 打车行程单", "发票号码：12345678901234567790", "订单号：ORDER-A"])
+        try makeTripImportPDF(itineraryB, lines: ["高德地图 打车行程单", "发票号码：12345678901234567795", "订单号：ORDER-B"])
+
+        claim = try store.importTripFiles([invoiceA, itineraryA], into: claim, kind: .taxi)
+        let oldInvoice = claim.expenses[0].invoices[0]
+        let expenseID = claim.expenses[0].id
+        claim = try store.replaceExpenseAttachment(oldInvoice, in: claim, expenseID: expenseID, role: .invoice, with: invoiceB)
+        expectEqual(claim.expenses.count, 1)
+        expectEqual(claim.invoiceCount, 1)
+        expectEqual(claim.invoiceLedgerRows.count, 1)
+        expectEqual(claim.invoiceTotal, 6200)
+        expectFalse(FileManager.default.fileExists(atPath: store.url(for: oldInvoice).path))
+        let oldItinerary = claim.expenses[0].itineraries![0]
+        claim = try store.replaceExpenseAttachment(oldItinerary, in: claim, expenseID: expenseID, role: .itinerary, with: itineraryB)
+        expectEqual(claim.expenses[0].itineraries?.count, 1)
+        expectTrue(claim.expenses[0].itineraries?.first?.id != oldItinerary.id)
+        expectFalse(FileManager.default.fileExists(atPath: store.url(for: oldItinerary).path))
+
+        // Re-importing the same invoice number updates the existing row without adding another.
+        claim = try store.importTripFiles([invoiceB], into: claim, kind: .taxi)
+        expectEqual(claim.expenses.count, 1)
+        expectEqual(claim.invoiceCount, 1)
+        expectEqual(claim.invoiceLedgerRows.count, 1)
+        expectEqual(claim.invoiceTotal, 6200)
+        let rowID = claim.invoiceLedgerRows[0].id
+        let attachments = claim.attachments
+        claim = store.removeLedgerRow(rowID, in: claim)!
+        expectEqual(claim.expenses.count, 0)
+        expectEqual(claim.invoiceCount, 0)
+        expectEqual(claim.invoiceLedgerRows.count, 0)
+        expectTrue(attachments.allSatisfy { !FileManager.default.fileExists(atPath: store.url(for: $0).path) })
     }
 
     @MainActor func testSubsidyRejectsNewInvoicesAndPreservesLegacyAttachments() throws {
@@ -3563,7 +3610,7 @@ final class ReimburChecks {
                 }
             }
             // The record-list toggle sits on the left edge of the record pane.
-            click(NSPoint(x: 535, y: 19))
+            click(NSPoint(x: 543, y: 19))
             expectTrue(defaults.bool(forKey: "recordsCollapsed"))
             click(NSPoint(x: 224, y: 19))
             expectFalse(defaults.bool(forKey: "recordsCollapsed"))
@@ -3884,6 +3931,7 @@ private func expectNoThrow<T>(_ action: @autoclosure () throws -> T, file: Stati
             ("Date titles and duplicate names survive SQLite", checks.testDefaultDateTitleAllowsDuplicateNames),
             ("Grouped expense totals retain separate routes", checks.testExpenseGroupsAggregateWithoutMergingEntries),
             ("Invoice deletion persists and preserves other files", checks.testInvoiceDeletionPersistsAndPreservesOtherAttachments),
+            ("Attachment replacement invoice dedup and ledger deletion", checks.testAttachmentReplacementInvoiceDedupAndLedgerRowDeletion),
             ("Subsidy skips new invoices and preserves legacy files", checks.testSubsidyRejectsNewInvoicesAndPreservesLegacyAttachments),
             ("Native PDF and image preview", checks.testNativePreviewLoadsPagesAndImages),
             ("Attachment copy batch rollback restart cleanup", checks.testImportCopiesFilesAndRollsBackInvalidBatch),
